@@ -85,19 +85,8 @@ def uv_install_root(python_path):
     return os.path.dirname(parent)
 
 
-def uv_install_deps(python_path, req_file, target_dir):
-    """Install pure-Python dependencies via 'uv pip install --target'."""
-    print(f"[2/6] Installing dependencies via uv pip...")
-    os.makedirs(target_dir, exist_ok=True)
-    subprocess.run([
-        "uv", "pip", "install",
-        "--python", python_path,
-        "--target", target_dir,
-        "-r", req_file,
-        "--no-compile",
-    ], check=True)
-
-    # v1 safety net: fail the build if any native extensions snuck in
+def _check_native_extensions(target_dir):
+    """Fail the build if any native extensions are found in target_dir."""
     native_files = []
     for root, _, files in os.walk(target_dir):
         for f in files:
@@ -113,10 +102,81 @@ def uv_install_deps(python_path, req_file, target_dir):
         if len(native_files) > 10:
             print(f"    ... and {len(native_files) - 10} more", file=sys.stderr)
         die(
-            "pypack v1 only supports pure-Python packages.\n"
+            "pypack only supports pure-Python packages.\n"
             "  Remove packages with C extensions and try again.\n"
-            "  Native extension support is planned for v2."
+            "  Native extension support is planned for v0.3.0."
         )
+
+
+def uv_install_deps(python_path, req_file, target_dir):
+    """Install pure-Python dependencies via 'uv pip install --target'."""
+    print(f"[2/6] Installing dependencies via uv pip...")
+    os.makedirs(target_dir, exist_ok=True)
+    subprocess.run([
+        "uv", "pip", "install",
+        "--python", python_path,
+        "--target", target_dir,
+        "-r", req_file,
+        "--no-compile",
+    ], check=True)
+
+    _check_native_extensions(target_dir)
+
+
+def uv_install_project_deps(python_path, project_dir, target_dir):
+    """Install a project's dependencies via uv.
+
+    Works with any project format uv understands: pyproject.toml,
+    setup.py, setup.cfg. Uses 'uv pip compile' to resolve deps from
+    the project metadata, then 'uv pip install' to install them.
+    """
+    print(f"[2/6] Installing project dependencies via uv pip...")
+
+    # Find the project metadata file
+    for name in ("pyproject.toml", "setup.cfg", "setup.py"):
+        src = os.path.join(project_dir, name)
+        if os.path.isfile(src):
+            break
+    else:
+        die(f"No pyproject.toml, setup.cfg, or setup.py found in {project_dir}")
+
+    # Resolve dependencies to a pinned requirements list
+    r = subprocess.run(
+        ["uv", "pip", "compile", "--python", python_path, src],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        die(f"uv pip compile failed:\n{r.stderr}")
+
+    # Filter out comments and blank lines
+    lines = [
+        l.strip() for l in r.stdout.splitlines()
+        if l.strip() and not l.strip().startswith("#")
+    ]
+    if not lines:
+        print("       No dependencies found.")
+        return
+
+    # Write to a temp file and install
+    os.makedirs(target_dir, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", prefix="pypack-reqs-", delete=False
+    ) as tmp:
+        tmp.write("\n".join(lines) + "\n")
+        tmp_path = tmp.name
+
+    try:
+        subprocess.run([
+            "uv", "pip", "install",
+            "--python", python_path,
+            "--target", target_dir,
+            "-r", tmp_path,
+            "--no-compile",
+        ], check=True)
+    finally:
+        os.unlink(tmp_path)
+
+    _check_native_extensions(target_dir)
 
 
 # ── Stub compilation ─────────────────────────────────────────────────
@@ -320,7 +380,20 @@ def cmd_build(args):
         if not os.path.isfile(main_py):
             die(f"Package '{entry}' has no __main__.py")
 
+    if args.requirements and args.project:
+        die("Cannot use both --requirements and --project at the same time.")
+
     python_version = args.python or "3.13"
+
+    # Resolve --project to a directory
+    project_dir = None
+    if args.project:
+        project_dir = os.path.normpath(args.project)
+        if os.path.isfile(project_dir):
+            # If a file was given (e.g. pyproject.toml), use its parent dir
+            project_dir = os.path.dirname(project_dir)
+        if not os.path.isdir(project_dir):
+            die(f"Project directory not found: {project_dir}")
 
     print(f"\n  pypack build")
     print(f"  entry:   {entry}")
@@ -328,6 +401,8 @@ def cmd_build(args):
     print(f"  output:  {args.output}")
     if args.requirements:
         print(f"  deps:    {args.requirements}")
+    if project_dir:
+        print(f"  project: {project_dir}")
     print()
 
     with tempfile.TemporaryDirectory(prefix="pypack-") as work_dir:
@@ -342,6 +417,9 @@ def cmd_build(args):
         if args.requirements:
             deps_dir = os.path.join(work_dir, "deps")
             uv_install_deps(python_path, args.requirements, deps_dir)
+        elif project_dir:
+            deps_dir = os.path.join(work_dir, "deps")
+            uv_install_project_deps(python_path, project_dir, deps_dir)
 
         # 3. Compile C stub
         stub_path = compile_stub(work_dir)
@@ -394,6 +472,11 @@ def main():
     build_parser.add_argument(
         "-r", "--requirements",
         help="Path to requirements.txt for dependencies",
+    )
+    build_parser.add_argument(
+        "-p", "--project",
+        help="Path to a project directory (or its pyproject.toml/setup.py); "
+             "dependencies are resolved by uv",
     )
 
     args = parser.parse_args()

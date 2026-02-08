@@ -138,6 +138,17 @@ python pypack.py build \
     -o dist/script
 ```
 
+### From a project (`pyproject.toml`, `setup.py`, `setup.cfg`)
+
+```bash
+python pypack.py build \
+    --entry myapp/ \
+    -p . \
+    -o dist/myapp
+```
+
+This delegates all dependency resolution to uv, which understands `pyproject.toml`, `setup.py`, and `setup.cfg`.
+
 ### Options
 
 | Flag | Description | Default |
@@ -146,6 +157,7 @@ python pypack.py build \
 | `-o, --output` | Output binary path | (required) |
 | `--python` | Python version to bundle | `3.13` |
 | `-r, --requirements` | Path to `requirements.txt` | (none) |
+| `-p, --project` | Path to a project directory (or its `pyproject.toml`/`setup.py`); deps resolved by uv | (none) |
 
 ## Examples
 
@@ -244,10 +256,9 @@ uv run pytest tests/ -v
 | macOS arm64 | ✅ |
 | Windows | ❌ (planned) |
 
-## Limitations (v1)
+## Limitations (v0.1.0)
 
-- **Pure Python only.** Packages with C extensions (numpy, pandas, etc.) are rejected at build time. Native extension support is planned for v2.
-- **`requirements.txt` only.** Other dependency formats (`pyproject.toml`, `setup.py`, etc.) are not yet supported.
+- **Pure Python only.** Packages with C extensions (numpy, pandas, etc.) are rejected at build time. Native extension support is planned for v0.4.0.
 - **No cross-compilation.** The binary is built for the current platform only.
 - **Target needs zstd + tar.** The first run extracts the runtime using these tools.
 - **~15 MB minimum size.** The compressed Python runtime is the floor.
@@ -256,16 +267,15 @@ uv run pytest tests/ -v
 
 | Version | Feature | Description |
 |---------|---------|-------------|
-| **v2** | **`pyproject.toml` deps** | Read dependencies from `[project.dependencies]` via `uv pip install .` or `uv export` |
-| **v3** | **`setup.py` / `setup.cfg` deps** | Support legacy packaging formats via `uv pip install .` |
-| **v4** | **Native extensions** | Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels |
-| **v5** | **Stdlib tree-shaking** | Analyze imports → strip unused stdlib modules (`tkinter`, `test`, `idlelib`, etc.) to cut ~5–10 MB |
-| **v6** | **Layered caching** | Hash runtime/deps/app independently — skip re-extracting unchanged layers |
-| **v7** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |
-| **v8** | **Cross-compilation** | `--target linux-x86_64` from macOS, using uv to fetch the target PBS release |
-| **v9** | **Embedded zstd** | Statically link zstd (~100 KB) into the C stub → zero runtime deps on the target |
-| **v10** | **`.pyc` pre-compilation** | `compileall` at build time, ship only bytecode for faster startup |
-| **v11** | **`memfd_create`** | Load interpreter from memory on Linux — no disk extraction, instant first run |
+| ~~**v0.2.0**~~ | ~~**Project deps (`pyproject.toml`, `setup.py`, `setup.cfg`)**~~ | ~~`--project` flag delegates dep resolution to uv, which handles all formats~~ ✅ |
+| **v0.3.0** | **Native extensions** | Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels |
+| **v0.4.0** | **Stdlib tree-shaking** | Analyze imports → strip unused stdlib modules (`tkinter`, `test`, `idlelib`, etc.) to cut ~5–10 MB |
+| **v0.5.0** | **Layered caching** | Hash runtime/deps/app independently — skip re-extracting unchanged layers |
+| **v0.6.0** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |
+| **v0.7.0** | **Cross-compilation** | `--target linux-x86_64` from macOS, using uv to fetch the target PBS release |
+| **v0.8.0** | **Embedded zstd** | Statically link zstd (~100 KB) into the C stub → zero runtime deps on the target |
+| **v0.9.0** | **`.pyc` pre-compilation** | `compileall` at build time, ship only bytecode for faster startup |
+| **v0.10.0** | **`memfd_create`** | Load interpreter from memory on Linux — no disk extraction, instant first run |
 
 ## License
 

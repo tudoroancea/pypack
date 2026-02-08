@@ -43,7 +43,7 @@ def tmp(tmp_path):
     return tmp_path
 
 
-def _build(entry, output, requirements=None, python=PYTHON_VERSION):
+def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION):
     """Helper: run pypack build and return the output path."""
     cmd = [
         sys.executable, PYPACK, "build",
@@ -53,6 +53,8 @@ def _build(entry, output, requirements=None, python=PYTHON_VERSION):
     ]
     if requirements:
         cmd += ["-r", requirements]
+    if project:
+        cmd += ["-p", project]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         pytest.fail(
@@ -361,6 +363,139 @@ class TestEnvironment:
 
 
 # ── Test: error handling ──────────────────────────────────────────────
+
+
+class TestProjectDeps:
+    """Test building with dependencies from --project (pyproject.toml / setup.py)."""
+
+    def _make_pyproject(self, path, deps):
+        """Helper: create a minimal pyproject.toml with given deps."""
+        deps_str = ", ".join(f'"{d}"' for d in deps)
+        path.write_text(
+            textwrap.dedent(f"""\
+                [project]
+                name = "testapp"
+                version = "0.1.0"
+                dependencies = [{deps_str}]
+
+                [build-system]
+                requires = ["hatchling"]
+                build-backend = "hatchling.build"
+            """)
+        )
+
+    def test_pyproject_basic(self, tmp):
+        """Should install deps from pyproject.toml via uv."""
+        pkg = tmp / "cli"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import click
+                @click.command()
+                @click.option("--name", default="world")
+                def main(name):
+                    click.echo(f"Hello, {name}!")
+                main()
+            """)
+        )
+        self._make_pyproject(tmp / "pyproject.toml", ["click"])
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, project=str(tmp))
+
+        stdout, stderr, rc = _run(out, "--name", "pypack")
+        assert rc == 0, f"stderr: {stderr}"
+        assert "Hello, pypack!" in stdout
+
+    def test_pyproject_file_path(self, tmp):
+        """Should accept a pyproject.toml file path (uses parent dir)."""
+        pkg = tmp / "cli"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import click
+                print(f"click loaded: {click.__name__}")
+            """)
+        )
+        project_dir = tmp / "project"
+        project_dir.mkdir()
+        self._make_pyproject(project_dir / "pyproject.toml", ["click"])
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, project=str(project_dir / "pyproject.toml"))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "click loaded:" in stdout
+
+    def test_setup_py(self, tmp):
+        """Should install deps from a setup.py project via uv."""
+        pkg = tmp / "cli"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import click
+                print(f"click loaded: {click.__name__}")
+            """)
+        )
+        project_dir = tmp / "project"
+        project_dir.mkdir()
+        (project_dir / "setup.py").write_text(
+            textwrap.dedent("""\
+                from setuptools import setup
+                setup(
+                    name="testapp",
+                    version="0.1.0",
+                    install_requires=["click"],
+                )
+            """)
+        )
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, project=str(project_dir))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "click loaded:" in stdout
+
+    def test_project_no_deps(self, tmp):
+        """Should succeed if project has no dependencies."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('no deps')")
+        self._make_pyproject(tmp / "pyproject.toml", [])
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, project=str(tmp))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0
+        assert "no deps" in stdout
+
+    def test_requirements_and_project_conflict(self, tmp):
+        """Should fail if both --requirements and --project are given."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+        req = tmp / "requirements.txt"
+        req.write_text("click\n")
+        self._make_pyproject(tmp / "pyproject.toml", ["click"])
+
+        out = str(tmp / "bin")
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg),
+             "-r", str(req),
+             "--project", str(tmp),
+             "-o", out],
+            capture_output=True, text=True,
+        )
+        assert result.returncode != 0
 
 
 class TestErrorHandling:
