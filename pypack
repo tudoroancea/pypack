@@ -1,0 +1,4 @@
+#!/usr/bin/env -S uv run python
+"""pypack CLI — convenience entry point. Usage: ./pypack build ..."""
+from pypack import main
+main()

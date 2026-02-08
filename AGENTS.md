@@ -4,7 +4,7 @@
 
 **pypack** is a tool that bundles Python applications into single-binary executables powered by [uv](https://docs.astral.sh/uv/) and [python-build-standalone](https://github.com/astral-sh/python-build-standalone). It concatenates a compiled C stub, a compressed Python runtime, and a ZIP payload (user code + dependencies) into one file that is simultaneously a native executable and a valid ZIP archive.
 
-- **Version:** 0.4.0
+- **Version:** 0.5.0
 - **License:** MIT
 - **Platforms:** Linux x86_64/aarch64, macOS x86_64/arm64 (no Windows yet)
 
@@ -106,6 +106,15 @@ The C stub reads the trailer, hashes the runtime blob for cache keying, extracts
 ### Adding a new CLI flag
 
 Add the argument to the `build_parser` in `main()`, then handle it in `cmd_build()`.
+
+### Build cache
+
+Build artifacts are cached at `~/.cache/pypack/build/` (respects `XDG_CACHE_HOME`):
+- `stubs/<key>` — compiled C stub (keyed by stub.c hash + platform + CC)
+- `runtimes/<key>.tar.zst` — stripped + compressed runtime (keyed by install path + strip config)
+- `deps/<key>.tar` — installed dependencies as tarball (keyed by requirements/project hash + python path)
+
+Cache utility functions: `_build_cache_dir()`, `_sha256()`, `_sha256_file()`, `_cache_save()`, `_cache_save_dir()`, `_cache_restore_dir()`, `_stub_cache_key()`, `_runtime_cache_key()`, `_deps_cache_key()`.
 
 ### Modifying the stub
 

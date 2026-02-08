@@ -16,6 +16,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import io
 import os
 import platform
@@ -82,6 +83,104 @@ def require_tool(name, install_hint=None):
     if shutil.which(name) is None:
         hint = f" ({install_hint})" if install_hint else ""
         die(f"'{name}' is not installed{hint}")
+
+
+# ── Build cache ───────────────────────────────────────────────────────
+
+def _build_cache_dir():
+    """Return the root directory for the build cache."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = xdg if xdg else os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "pypack", "build")
+
+
+def _sha256(data):
+    """SHA-256 hash of a string or bytes → first 16 hex chars."""
+    if isinstance(data, str):
+        data = data.encode()
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _sha256_file(path):
+    """SHA-256 hash of a file's contents → first 16 hex chars."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()[:16]
+
+
+def _cache_save(src, dst):
+    """Save a file to the build cache. Silently handles errors."""
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+    except OSError as e:
+        print(f"       Warning: could not save to build cache: {e}")
+
+
+def _cache_save_dir(src_dir, dst_tar):
+    """Save a directory to the build cache as a tarball."""
+    try:
+        os.makedirs(os.path.dirname(dst_tar), exist_ok=True)
+        subprocess.run(
+            ["tar", "-cf", dst_tar, "-C", src_dir, "."],
+            check=True, capture_output=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"       Warning: could not save deps to build cache: {e}")
+
+
+def _cache_restore_dir(src_tar, dst_dir):
+    """Restore a directory from a cached tarball. Returns True if successful."""
+    if not os.path.isfile(src_tar):
+        return False
+    try:
+        os.makedirs(dst_dir, exist_ok=True)
+        subprocess.run(
+            ["tar", "-xf", src_tar, "-C", dst_dir],
+            check=True, capture_output=True,
+        )
+        return True
+    except (OSError, subprocess.CalledProcessError):
+        return False
+
+
+def _stub_cache_key():
+    """Cache key for the compiled C stub."""
+    plat = f"{platform.system().lower()}-{platform.machine().lower()}"
+    return _sha256(
+        f"{_sha256_file(STUB_SRC)}|{plat}|{os.environ.get('CC', 'cc')}"
+    )
+
+
+def _runtime_cache_key(python_path, do_strip):
+    """Cache key for the stripped + compressed runtime."""
+    install_root = uv_install_root(python_path)
+    real_root = os.path.realpath(install_root)
+    strip_config = "|".join([
+        ",".join(sorted(STRIP_STDLIB_DIRS)),
+        ",".join(sorted(STRIP_STDLIB_FILES)),
+        ",".join(sorted(STRIP_TOPLEVEL_DIRS)),
+        ",".join(sorted(STRIP_LIB_PATTERNS)),
+    ])
+    return _sha256(
+        f"{real_root}|{'strip' if do_strip else 'nostrip'}|{strip_config}"
+    )
+
+
+def _deps_cache_key(python_path, req_file=None, project_dir=None):
+    """Cache key for installed dependencies."""
+    parts = [os.path.realpath(python_path)]
+    if req_file:
+        parts.append(f"req:{_sha256_file(req_file)}")
+    elif project_dir:
+        for name in ("pyproject.toml", "setup.cfg", "setup.py"):
+            p = os.path.join(project_dir, name)
+            if os.path.isfile(p):
+                parts.append(f"proj:{_sha256_file(p)}")
+                break
+    return _sha256("|".join(parts))
 
 
 # ── uv integration ───────────────────────────────────────────────────
@@ -292,19 +391,30 @@ def strip_runtime(install_dir):
 
 # ── Stub compilation ─────────────────────────────────────────────────
 
-def compile_stub(work_dir):
+def compile_stub(work_dir, use_cache=True):
     """Compile the C stub for the current platform."""
     print("[3/7] Compiling C stub...")
 
-    # Check for pre-built stubs first
+    out = os.path.join(work_dir, "stub")
     plat = f"{platform.system().lower()}-{platform.machine().lower()}"
+
+    # Check for pre-built stubs first
     prebuilt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stubs")
     prebuilt = os.path.join(prebuilt_dir, f"stub-{plat}")
     if os.path.isfile(prebuilt):
-        out = os.path.join(work_dir, "stub")
         shutil.copy2(prebuilt, out)
         print(f"       Using pre-built stub for {plat}")
         return out
+
+    # Check build cache
+    cache_path = None
+    if use_cache and os.path.isfile(STUB_SRC):
+        cache_key = _stub_cache_key()
+        cache_path = os.path.join(_build_cache_dir(), "stubs", cache_key)
+        if os.path.isfile(cache_path):
+            shutil.copy2(cache_path, out)
+            print("       Using cached stub")
+            return out
 
     # Compile from source
     if not os.path.isfile(STUB_SRC):
@@ -312,7 +422,6 @@ def compile_stub(work_dir):
 
     require_tool("cc", "install gcc or clang")
 
-    out = os.path.join(work_dir, "stub")
     cc = os.environ.get("CC", "cc")
 
     # Try static linking on Linux for maximum portability
@@ -323,14 +432,19 @@ def compile_stub(work_dir):
         )
         if r.returncode == 0:
             print("       Compiled (static)")
-            return out
-        print("       Static linking failed, falling back to dynamic")
-        subprocess.run([cc, "-O2", "-s", "-o", out, STUB_SRC], check=True)
+        else:
+            print("       Static linking failed, falling back to dynamic")
+            subprocess.run([cc, "-O2", "-s", "-o", out, STUB_SRC], check=True)
+            print("       Compiled (dynamic)")
     else:
         # macOS: -s is not supported by Apple clang linker
         subprocess.run([cc, "-O2", "-o", out, STUB_SRC], check=True)
+        print("       Compiled (dynamic)")
 
-    print("       Compiled (dynamic)")
+    # Save to build cache
+    if cache_path:
+        _cache_save(out, cache_path)
+
     return out
 
 
@@ -600,6 +714,7 @@ def cmd_build(args):
         die("Cannot use both --requirements and --project at the same time.")
 
     do_strip = not args.no_strip
+    use_cache = not args.no_cache
 
     python_version = args.python or "3.13"
 
@@ -622,6 +737,7 @@ def cmd_build(args):
     if project_dir:
         print(f"  project: {project_dir}")
     print(f"  strip:   {'yes' if do_strip else 'no'}")
+    print(f"  cache:   {'yes' if use_cache else 'no'}")
     print()
 
     with tempfile.TemporaryDirectory(prefix="pypack-") as work_dir:
@@ -631,27 +747,63 @@ def cmd_build(args):
         print(f"       interpreter:  {python_path}")
         print(f"       install root: {install_root}")
 
-        # 2. Install deps
+        # 2. Install deps (with layered caching)
         deps_dir = None
-        if args.requirements:
+        if args.requirements or project_dir:
             deps_dir = os.path.join(work_dir, "deps")
-            uv_install_deps(python_path, args.requirements, deps_dir)
-        elif project_dir:
-            deps_dir = os.path.join(work_dir, "deps")
-            uv_install_project_deps(python_path, project_dir, deps_dir)
+            deps_cache_hit = False
 
-        # 3. Compile C stub
-        stub_path = compile_stub(work_dir)
+            if use_cache:
+                deps_key = _deps_cache_key(
+                    python_path, args.requirements, project_dir,
+                )
+                cached_deps = os.path.join(
+                    _build_cache_dir(), "deps", f"{deps_key}.tar",
+                )
+                if _cache_restore_dir(cached_deps, deps_dir):
+                    print("[2/7] Using cached dependencies...")
+                    _check_native_extensions(deps_dir)
+                    deps_cache_hit = True
 
-        # 4. Create app ZIP
+            if not deps_cache_hit:
+                if args.requirements:
+                    uv_install_deps(python_path, args.requirements, deps_dir)
+                else:
+                    uv_install_project_deps(python_path, project_dir, deps_dir)
+                # Save deps to build cache
+                if use_cache:
+                    _cache_save_dir(deps_dir, cached_deps)
+
+        # 3. Compile C stub (with layered caching)
+        stub_path = compile_stub(work_dir, use_cache=use_cache)
+
+        # 4. Create app ZIP (always rebuilt — fast)
         app_zip = make_app_zip(entry, deps_dir)
 
-        # 5. Copy & strip runtime
-        runtime_dir = prepare_runtime(install_root, work_dir, do_strip=do_strip)
-
-        # 6. Compress runtime
+        # 5+6. Prepare & compress runtime (with layered caching)
         runtime_path = os.path.join(work_dir, "runtime.tar.zst")
-        compress_runtime(runtime_dir, runtime_path)
+        runtime_cache_hit = False
+
+        if use_cache:
+            rt_key = _runtime_cache_key(python_path, do_strip)
+            cached_runtime = os.path.join(
+                _build_cache_dir(), "runtimes", f"{rt_key}.tar.zst",
+            )
+            if os.path.isfile(cached_runtime):
+                shutil.copy2(cached_runtime, runtime_path)
+                mb = os.path.getsize(runtime_path) / 1024 / 1024
+                print(f"[5/7] Using cached runtime...")
+                print(f"[6/7] Using cached runtime... ({mb:.1f} MB)")
+                runtime_cache_hit = True
+
+        if not runtime_cache_hit:
+            runtime_dir = prepare_runtime(
+                install_root, work_dir, do_strip=do_strip,
+            )
+            compress_runtime(runtime_dir, runtime_path)
+            # Save compressed runtime to build cache
+            if use_cache:
+                _cache_save(runtime_path, cached_runtime)
 
         # 7. Assemble final binary
         output = args.output
@@ -662,6 +814,39 @@ def cmd_build(args):
     print(f"      Run with: ./{output}")
     print(f"      First run extracts the runtime to ~/.cache/pypack/")
     print(f"      Subsequent runs start in ~100ms.\n")
+
+
+# ── Clean command ─────────────────────────────────────────────────────
+
+def cmd_clean(args):
+    """Clean pypack caches."""
+    xdg = os.environ.get("XDG_CACHE_HOME", "")
+    base = xdg if xdg else os.path.join(os.path.expanduser("~"), ".cache")
+
+    if args.all:
+        cache_root = os.path.join(base, "pypack")
+        if os.path.isdir(cache_root):
+            sz = sum(
+                os.path.getsize(os.path.join(r, f))
+                for r, _, files in os.walk(cache_root)
+                for f in files
+            )
+            shutil.rmtree(cache_root)
+            print(f"  Cleaned all caches ({sz / 1024 / 1024:.1f} MB): {cache_root}")
+        else:
+            print(f"  No cache found at {cache_root}")
+    else:
+        build_cache = os.path.join(base, "pypack", "build")
+        if os.path.isdir(build_cache):
+            sz = sum(
+                os.path.getsize(os.path.join(r, f))
+                for r, _, files in os.walk(build_cache)
+                for f in files
+            )
+            shutil.rmtree(build_cache)
+            print(f"  Cleaned build cache ({sz / 1024 / 1024:.1f} MB): {build_cache}")
+        else:
+            print(f"  No build cache found at {build_cache}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────
@@ -705,11 +890,28 @@ def main():
         help="Don't strip unused stdlib modules from the runtime "
              "(keeps tkinter, idlelib, test, etc.)",
     )
+    build_parser.add_argument(
+        "--no-cache", action="store_true", default=False,
+        help="Disable build cache — force a full rebuild of all layers "
+             "(stub, runtime, dependencies)",
+    )
+
+    # clean subcommand
+    clean_parser = subparsers.add_parser(
+        "clean",
+        help="Clean the pypack build cache",
+    )
+    clean_parser.add_argument(
+        "--all", action="store_true", default=False,
+        help="Clean all caches (build + runtime extraction cache)",
+    )
 
     args = parser.parse_args()
 
     if args.command == "build":
         cmd_build(args)
+    elif args.command == "clean":
+        cmd_clean(args)
     else:
         parser.print_help()
 

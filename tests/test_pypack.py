@@ -44,8 +44,8 @@ def tmp(tmp_path):
 
 
 def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION,
-           no_strip=False):
-    """Helper: run pypack build and return the output path."""
+           no_strip=False, no_cache=False, env=None):
+    """Helper: run pypack build and return the (output_path, stdout) tuple."""
     cmd = [
         sys.executable, PYPACK, "build",
         "--entry", entry,
@@ -58,7 +58,10 @@ def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION
         cmd += ["-p", project]
     if no_strip:
         cmd += ["--no-strip"]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if no_cache:
+        cmd += ["--no-cache"]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
+                            env=env)
     if result.returncode != 0:
         pytest.fail(
             f"pypack build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -757,7 +760,7 @@ class TestStdlibStripping:
         out = str(tmp / "bin")
         result = subprocess.run(
             [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out, "--no-strip"],
+             "--entry", str(pkg), "-o", out, "--no-strip", "--no-cache"],
             capture_output=True, text=True, timeout=300,
         )
         assert result.returncode == 0
@@ -848,3 +851,269 @@ class TestCaching:
         _, stderr2, rc2 = _run(out)
         assert rc2 == 0
         assert "extracting" not in stderr2.lower()
+
+
+# ── Test: build cache (layered caching) ───────────────────────────────
+
+
+class TestBuildCache:
+    """Test that build-time layered caching works correctly."""
+
+    def _make_env(self, tmp):
+        """Create an env dict with a test-specific XDG_CACHE_HOME."""
+        env = os.environ.copy()
+        env["XDG_CACHE_HOME"] = str(tmp / "xdg_cache")
+        return env
+
+    def test_cache_populated_on_first_build(self, tmp):
+        """First build should populate the build cache."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+        _build(str(pkg), out, env=env)
+
+        build_cache = os.path.join(env["XDG_CACHE_HOME"], "pypack", "build")
+        assert os.path.isdir(build_cache)
+
+        # Should have cached stub and runtime
+        stubs_dir = os.path.join(build_cache, "stubs")
+        runtimes_dir = os.path.join(build_cache, "runtimes")
+        assert os.path.isdir(stubs_dir), "Stub cache dir missing"
+        assert len(os.listdir(stubs_dir)) == 1, "Expected 1 cached stub"
+        assert os.path.isdir(runtimes_dir), "Runtime cache dir missing"
+        assert len(os.listdir(runtimes_dir)) == 1, "Expected 1 cached runtime"
+
+    def test_second_build_uses_cache(self, tmp):
+        """Second build with same inputs should use cached layers."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+
+        # First build populates cache
+        _build(str(pkg), out, env=env)
+
+        # Second build — should use cache
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        assert result.returncode == 0
+        assert "Using cached stub" in result.stdout
+        assert "Using cached runtime" in result.stdout
+
+    def test_cached_build_produces_working_binary(self, tmp):
+        """Binary produced from cached build should work correctly."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import sys
+                print(f"cached build works, args={sys.argv[1:]}")
+            """)
+        )
+
+        env = self._make_env(tmp)
+        out1 = str(tmp / "bin1")
+        out2 = str(tmp / "bin2")
+
+        # First build
+        _build(str(pkg), out1, env=env)
+        # Second build (uses cache)
+        _build(str(pkg), out2, env=env)
+
+        stdout1, _, rc1 = _run(out1, "test")
+        stdout2, _, rc2 = _run(out2, "test")
+        assert rc1 == 0
+        assert rc2 == 0
+        assert "cached build works, args=['test']" in stdout1
+        assert "cached build works, args=['test']" in stdout2
+
+    def test_no_cache_flag(self, tmp):
+        """--no-cache should skip the build cache entirely."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+
+        # First build populates cache
+        _build(str(pkg), out, env=env)
+
+        # Second build with --no-cache — should NOT use cache
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out, "--no-cache"],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        assert result.returncode == 0
+        assert "Using cached stub" not in result.stdout
+        assert "Using cached runtime" not in result.stdout
+        assert "cache:   no" in result.stdout
+
+    def test_deps_caching(self, tmp):
+        """Dependencies should be cached and reused on second build."""
+        pkg = tmp / "cli"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("import click; print(f'click={click.__name__}')")
+        req = tmp / "requirements.txt"
+        req.write_text("click\n")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+
+        # First build
+        _build(str(pkg), out, requirements=str(req), env=env)
+
+        # Check deps cache was populated
+        deps_dir = os.path.join(env["XDG_CACHE_HOME"], "pypack", "build", "deps")
+        assert os.path.isdir(deps_dir), "Deps cache dir missing"
+        assert len(os.listdir(deps_dir)) == 1, "Expected 1 cached deps tarball"
+
+        # Second build should use cached deps
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out, "-r", str(req)],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        assert result.returncode == 0
+        assert "Using cached dependencies" in result.stdout
+
+        # Verify binary still works
+        stdout, _, rc = _run(out)
+        assert rc == 0
+        assert "click=click" in stdout
+
+    def test_deps_cache_invalidated_on_change(self, tmp):
+        """Changing requirements.txt should invalidate the deps cache."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                try:
+                    import click
+                    print(f"has_click=True")
+                except ImportError:
+                    print(f"has_click=False")
+                try:
+                    from markupsafe import escape
+                    print(f"has_markupsafe=True")
+                except ImportError:
+                    print(f"has_markupsafe=False")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("click\n")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+
+        # First build with click
+        _build(str(pkg), out, requirements=str(req), env=env)
+
+        # Change requirements to markupsafe
+        req.write_text("markupsafe\n")
+
+        # Second build — deps cache should miss
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out, "-r", str(req)],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        assert result.returncode == 0
+        # Should NOT use cached deps (different requirements)
+        assert "Using cached dependencies" not in result.stdout
+        # But SHOULD use cached stub and runtime
+        assert "Using cached stub" in result.stdout
+        assert "Using cached runtime" in result.stdout
+
+        # Verify new deps are correct
+        stdout, _, rc = _run(out)
+        assert rc == 0
+        assert "has_markupsafe=True" in stdout
+
+    def test_app_code_change_reuses_cache(self, tmp):
+        """Changing only app code should reuse all cached layers."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('version 1')")
+
+        env = self._make_env(tmp)
+        out = str(tmp / "bin")
+
+        # First build
+        _build(str(pkg), out, env=env)
+
+        # Change app code
+        (pkg / "__main__.py").write_text("print('version 2')")
+
+        # Second build — all layers should be cached
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out],
+            capture_output=True, text=True, timeout=300, env=env,
+        )
+        assert result.returncode == 0
+        assert "Using cached stub" in result.stdout
+        assert "Using cached runtime" in result.stdout
+
+        # Verify new app code runs
+        stdout, _, rc = _run(out)
+        assert rc == 0
+        assert "version 2" in stdout
+
+
+class TestClean:
+    """Test the clean subcommand."""
+
+    def test_clean_build_cache(self, tmp):
+        """pypack clean should remove the build cache."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        env = os.environ.copy()
+        env["XDG_CACHE_HOME"] = str(tmp / "xdg_cache")
+        out = str(tmp / "bin")
+
+        # Build to populate cache
+        _build(str(pkg), out, env=env)
+
+        build_cache = os.path.join(str(tmp / "xdg_cache"), "pypack", "build")
+        assert os.path.isdir(build_cache)
+
+        # Clean
+        result = subprocess.run(
+            [sys.executable, PYPACK, "clean"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0
+        assert "Cleaned build cache" in result.stdout
+        assert not os.path.isdir(build_cache)
+
+    def test_clean_no_cache(self, tmp):
+        """pypack clean should handle missing cache gracefully."""
+        env = os.environ.copy()
+        env["XDG_CACHE_HOME"] = str(tmp / "empty_cache")
+
+        result = subprocess.run(
+            [sys.executable, PYPACK, "clean"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0
+        assert "No build cache" in result.stdout

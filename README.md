@@ -159,6 +159,7 @@ This delegates all dependency resolution to uv, which understands `pyproject.tom
 | `-r, --requirements` | Path to `requirements.txt` | (none) |
 | `-p, --project` | Path to a project directory (or its `pyproject.toml`/`setup.py`); deps resolved by uv | (none) |
 | `--no-strip` | Don't strip unused stdlib modules (keeps tkinter, idlelib, test, etc.) | strip enabled |
+| `--no-cache` | Disable build cache — force a full rebuild of all layers | cache enabled |
 
 ## Examples
 
@@ -210,6 +211,45 @@ python pypack.py build --entry cli/ -r requirements.txt -o dist/cli
 - **Cache key:** Based on a SHA-256 hash of the runtime blob — different Python versions or builds get separate cache entries.
 - **Isolation:** `PYTHONNOUSERSITE=1` is set to prevent interference from the host's site-packages.
 
+## Build cache
+
+pypack caches expensive build artifacts so that rebuilds are fast when only your app code changes:
+
+| Layer | Cache key | Typical time saved |
+|-------|-----------|-------------------|
+| **C stub** | `stub.c` content + platform + compiler | ~1–2s |
+| **Compressed runtime** | Python version + strip config | ~8–15s |
+| **Dependencies** | `requirements.txt` or `pyproject.toml` content + Python path | ~2–10s |
+
+**Typical rebuild with only app code changes: ~1s** (vs ~15s without cache).
+
+```bash
+# First build — populates cache
+python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+# [3/7] Compiling C stub...
+# [5/7] Preparing Python runtime...
+# [6/7] Compressing Python runtime... 7.2 MB
+
+# Second build (only app code changed) — uses cache
+python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+# [3/7] Compiling C stub... Using cached stub
+# [5/7] Using cached runtime...
+# [6/7] Using cached runtime... (7.2 MB)
+```
+
+Cache location: `~/.cache/pypack/build/` (respects `XDG_CACHE_HOME`).
+
+```bash
+# Force a full rebuild
+python pypack.py build --entry myapp/ -o dist/myapp --no-cache
+
+# Clean the build cache
+python pypack.py clean
+
+# Clean all caches (build + runtime extraction)
+python pypack.py clean --all
+```
+
 ## Stub compilation notes
 
 The C stub can be compiled manually for different platforms:
@@ -257,7 +297,7 @@ uv run pytest tests/ -v
 | macOS arm64 | ✅ |
 | Windows | ❌ (planned) |
 
-## Limitations (v0.4.0)
+## Limitations (v0.5.0)
 
 - **No cross-compilation.** The binary is built for the current platform only.
 - **Target needs zstd + tar.** The first run extracts the runtime using these tools.
@@ -272,12 +312,12 @@ uv run pytest tests/ -v
 | ~~**v0.2.0**~~ | ~~**Project deps (`pyproject.toml`, `setup.py`, `setup.cfg`)**~~ | ~~`--project` flag delegates dep resolution to uv, which handles all formats~~ ✅ |
 | ~~**v0.3.0**~~ | ~~**Native extensions**~~ | ~~Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels~~ ✅ |
 | ~~**v0.4.0**~~ | ~~**Stdlib tree-shaking**~~ | ~~Strip unused stdlib modules (`tkinter`, `test`, `idlelib`, `ensurepip`, Tcl/Tk libs, `__pycache__`, etc.) — cuts ~50% off binary size; `--no-strip` to opt out~~ ✅ |
-| **v0.5.0** | **Layered caching** | Hash runtime/deps/app independently — skip re-extracting unchanged layers |
-| **v0.6.0** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |
-| **v0.7.0** | **Cross-compilation** | `--target linux-x86_64` from macOS, using uv to fetch the target PBS release |
-| **v0.8.0** | **Embedded zstd** | Statically link zstd (~100 KB) into the C stub → zero runtime deps on the target |
-| **v0.9.0** | **`.pyc` pre-compilation** | `compileall` at build time, ship only bytecode for faster startup |
-| **v0.10.0** | **`memfd_create`** | Load interpreter from memory on Linux — no disk extraction, instant first run |
+| ~~**v0.5.0**~~ | ~~**Layered caching**~~ | ~~Hash runtime/deps/app independently — cache compiled stub, compressed runtime, and installed deps across builds; `--no-cache` to opt out; `pypack clean` to clear~~ ✅ |
+| **v0.6.0** | **Embedded zstd** | Statically link zstd (~100 KB) into the C stub → zero runtime deps on the target |
+| **v0.7.0** | **`.pyc` pre-compilation** | `compileall` at build time, ship only bytecode for faster startup |
+| **v0.8.0** | **Cross-compilation** | `--target linux-x86_64` from macOS, using uv to fetch the target PBS release |
+| **v0.9.0** | **`memfd_create`** | Load interpreter from memory on Linux — no disk extraction, instant first run |
+| **v0.10.0** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |
 
 ## License
 
