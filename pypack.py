@@ -86,7 +86,7 @@ def uv_install_root(python_path):
 
 
 def _check_native_extensions(target_dir):
-    """Fail the build if any native extensions are found in target_dir."""
+    """Report native extensions found in target_dir (informational)."""
     native_files = []
     for root, _, files in os.walk(target_dir):
         for f in files:
@@ -96,16 +96,12 @@ def _check_native_extensions(target_dir):
                 )
 
     if native_files:
-        print("\n  Native extensions found in dependencies:", file=sys.stderr)
-        for nf in native_files[:10]:
-            print(f"    ✗ {nf}", file=sys.stderr)
-        if len(native_files) > 10:
-            print(f"    ... and {len(native_files) - 10} more", file=sys.stderr)
-        die(
-            "pypack only supports pure-Python packages.\n"
-            "  Remove packages with C extensions and try again.\n"
-            "  Native extension support is planned for v0.3.0."
-        )
+        print(f"       Native extensions found ({len(native_files)} files):")
+        for nf in native_files[:5]:
+            print(f"         • {nf}")
+        if len(native_files) > 5:
+            print(f"         ... and {len(native_files) - 5} more")
+        print("       These will be extracted to cache at first run.")
 
 
 def uv_install_deps(python_path, req_file, target_dir):
@@ -249,14 +245,100 @@ import os
 import runpy
 
 
+_NATIVE_EXTS = (".so", ".dylib", ".pyd")
+
+
+def _extract_native_extensions(self_path, cache_dir):
+    """Extract packages containing native extensions from the zip to disk.
+
+    zipimport cannot load .so/.dylib/.pyd files, so we extract the entire
+    top-level package for any package that contains native extensions.
+    Returns the path to the extracted site-packages dir, or None.
+    """
+    import zipfile
+    import hashlib
+
+    if not zipfile.is_zipfile(self_path):
+        return None
+
+    with zipfile.ZipFile(self_path) as zf:
+        names = zf.namelist()
+
+        # Find native extensions under site-packages/
+        native_files = [
+            n for n in names
+            if n.startswith("site-packages/")
+            and any(n.endswith(ext) for ext in _NATIVE_EXTS)
+        ]
+
+        if not native_files:
+            return None
+
+        # Determine which top-level packages contain native extensions
+        native_packages = set()
+        for nf in native_files:
+            parts = nf.split("/")
+            if len(parts) >= 2:
+                native_packages.add(parts[1])
+
+        # Compute cache key from native file names + sizes
+        hasher = hashlib.sha256()
+        for nf in sorted(native_files):
+            info = zf.getinfo(nf)
+            hasher.update(f"{{nf}}:{{info.file_size}}:{{info.CRC}}".encode())
+        cache_key = hasher.hexdigest()[:16]
+
+        extract_dir = os.path.join(cache_dir, "native", cache_key)
+        sp_dir = os.path.join(extract_dir, "site-packages")
+        marker = os.path.join(extract_dir, ".done")
+
+        # Already extracted?
+        if os.path.exists(marker):
+            return sp_dir
+
+        # Extract all files belonging to native packages
+        os.makedirs(sp_dir, exist_ok=True)
+        for name in names:
+            if not name.startswith("site-packages/"):
+                continue
+            parts = name.split("/")
+            if len(parts) < 2 or parts[1] not in native_packages:
+                continue
+            target = os.path.join(extract_dir, name)
+            if name.endswith("/"):
+                os.makedirs(target, exist_ok=True)
+            else:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with open(target, "wb") as f:
+                    f.write(zf.read(name))
+
+        # Mark extraction complete
+        with open(marker, "w") as f:
+            f.write("ok\\n")
+
+        return sp_dir
+
+
 def _pypack_main():
     self_path = os.environ.get("_PYPACK_SELF", os.path.abspath(sys.argv[0]))
+    cache_dir = os.environ.get("_PYPACK_CACHE", "")
 
-    # The binary IS a valid zip. Python's zipimport can import from
-    # zip-internal paths like: /path/to/binary/site-packages/click/__init__.py
+    # Extract native extensions to disk if needed
+    native_sp = None
+    if cache_dir:
+        native_sp = _extract_native_extensions(self_path, cache_dir)
+
+    # Build sys.path in priority order:
+    #   1. self_path       — user code (__main__.py, package modules)
+    #   2. native_sp       — extracted native packages (filesystem, can os.listdir)
+    #   3. zip_site        — pure-Python deps (via zipimport)
     zip_site = os.path.join(self_path, "site-packages")
+
+    # Insert in reverse priority order at position 0
     if zip_site not in sys.path:
         sys.path.insert(0, zip_site)
+    if native_sp and native_sp not in sys.path:
+        sys.path.insert(0, native_sp)
     if self_path not in sys.path:
         sys.path.insert(0, self_path)
 

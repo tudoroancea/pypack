@@ -25,25 +25,25 @@ The result is a single file that is simultaneously a native executable (read fro
 
 ```
 ┌──────────────────────────────────┐  offset 0
-│  C stub (ELF / Mach-O)          │  ~50 KB compiled
-│  - reads trailer at own EOF     │
-│  - extracts runtime to cache    │
-│  - execs: python <self>         │
+│  C stub (ELF / Mach-O)           │  ~50 KB compiled
+│  - reads trailer at own EOF      │
+│  - extracts runtime to cache     │
+│  - execs: python <self>          │
 ├──────────────────────────────────┤  offset A
-│  Python runtime (tar.zst)       │  ~15 MB compressed
+│  Python runtime (tar.zst)        │  ~15 MB compressed
 │  (python-build-standalone via uv)│
 │  - interpreter + stripped stdlib │
 ├──────────────────────────────────┤  offset B
-│  App payload (ZIP)              │  variable
-│  - __main__.py  (bootstrap)     │
-│  - app/         (user code)     │
-│  - site-packages/ (pure deps)   │
+│  App payload (ZIP)               │  variable
+│  - __main__.py  (bootstrap)      │
+│  - app/         (user code)      │
+│  - site-packages/ (pure deps)    │
 ├──────────────────────────────────┤  offset C
-│  Trailer (32 bytes)             │
-│  - magic: b"PYPK\x00\x01"      │  8 bytes
-│  - runtime_offset: u64 LE       │  8 bytes
-│  - runtime_size: u64 LE         │  8 bytes
-│  - app_offset: u64 LE           │  8 bytes
+│  Trailer (32 bytes)              │
+│  - magic: b"PYPK\x00\x01"        │  8 bytes
+│  - runtime_offset: u64 LE        │  8 bytes
+│  - runtime_size: u64 LE          │  8 bytes
+│  - app_offset: u64 LE            │  8 bytes
 └──────────────────────────────────┘
 ```
 
@@ -73,7 +73,7 @@ User runs: ./myapp --flag1 --flag2
    └────────────┬─────────────────────┘
                 │
            ┌────┴────┐
-           │ Cached?  │
+           │ Cached? │
            └────┬────┘
          no     │     yes
          ▼      │      ▼
@@ -85,8 +85,8 @@ User runs: ./myapp --flag1 --flag2
         └────┬──┘────────┘
              ▼
    ┌──────────────────────────────┐
-   │  exec(cache/python, self,   │
-   │       argv[1], argv[2], ...)│
+   │  exec(cache/python, self,    │
+   │       argv[1], argv[2], ...) │
    │                              │
    │  Python sees self is a zip   │
    │  (zipimport), finds and runs │
@@ -256,19 +256,19 @@ uv run pytest tests/ -v
 | macOS arm64 | ✅ |
 | Windows | ❌ (planned) |
 
-## Limitations (v0.1.0)
+## Limitations (v0.3.0)
 
-- **Pure Python only.** Packages with C extensions (numpy, pandas, etc.) are rejected at build time. Native extension support is planned for v0.4.0.
 - **No cross-compilation.** The binary is built for the current platform only.
 - **Target needs zstd + tar.** The first run extracts the runtime using these tools.
 - **~15 MB minimum size.** The compressed Python runtime is the floor.
+- **Native extensions extracted at first run.** Packages with `.so`/`.dylib` files are included in the zip but extracted to `~/.cache/pypack/` on first run since `zipimport` can't load native code directly.
 
 ## Roadmap
 
 | Version | Feature | Description |
 |---------|---------|-------------|
 | ~~**v0.2.0**~~ | ~~**Project deps (`pyproject.toml`, `setup.py`, `setup.cfg`)**~~ | ~~`--project` flag delegates dep resolution to uv, which handles all formats~~ ✅ |
-| **v0.3.0** | **Native extensions** | Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels |
+| ~~**v0.3.0**~~ | ~~**Native extensions**~~ | ~~Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels~~ ✅ |
 | **v0.4.0** | **Stdlib tree-shaking** | Analyze imports → strip unused stdlib modules (`tkinter`, `test`, `idlelib`, etc.) to cut ~5–10 MB |
 | **v0.5.0** | **Layered caching** | Hash runtime/deps/app independently — skip re-extracting unchanged layers |
 | **v0.6.0** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |

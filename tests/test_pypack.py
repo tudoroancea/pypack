@@ -314,6 +314,193 @@ class TestDependencies:
             assert len(click_files) > 0, "click not found in site-packages"
 
 
+# ── Test: native extensions ────────────────────────────────────────────
+
+
+class TestNativeExtensions:
+    """Test building and running packages with C extensions."""
+
+    def test_markupsafe_import(self, tmp):
+        """MarkupSafe has a C speedup module — should build and run."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                from markupsafe import Markup, escape
+                print(f"escaped={escape('<b>bold</b>')}")
+                print(f"markup={Markup('<em>hi</em>')}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("markupsafe\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "escaped=&lt;b&gt;bold&lt;/b&gt;" in stdout
+        assert "markup=<em>hi</em>" in stdout
+
+    def test_native_ext_in_zip(self, tmp):
+        """Native extension files should be present in the zip payload."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("import markupsafe; print('ok')")
+        req = tmp / "requirements.txt"
+        req.write_text("markupsafe\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        with zipfile.ZipFile(out) as zf:
+            native_files = [
+                n for n in zf.namelist()
+                if any(n.endswith(ext) for ext in (".so", ".dylib", ".pyd"))
+            ]
+            assert len(native_files) > 0, "No native extensions in zip"
+            markupsafe_natives = [n for n in native_files if "markupsafe" in n]
+            assert len(markupsafe_natives) > 0, "markupsafe .so not in zip"
+
+    def test_native_ext_caching(self, tmp):
+        """Second run should reuse extracted native extensions."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                from markupsafe import escape
+                print(f"result={escape('<test>')}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("markupsafe\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        # First run
+        stdout1, _, rc1 = _run(out)
+        assert rc1 == 0
+        assert "result=&lt;test&gt;" in stdout1
+
+        # Second run — should reuse cache
+        stdout2, _, rc2 = _run(out)
+        assert rc2 == 0
+        assert "result=&lt;test&gt;" in stdout2
+
+    def test_pyyaml_native(self, tmp):
+        """PyYAML has optional C extensions — should work."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import yaml
+                data = yaml.safe_load("name: pypack")
+                print(f"name={data['name']}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("pyyaml\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "name=pypack" in stdout
+
+    def test_mixed_pure_and_native_deps(self, tmp):
+        """Mix of pure-Python and native deps should work together."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import click
+                from markupsafe import escape
+                print(f"click={click.__name__}")
+                print(f"escaped={escape('<ok>')}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("click\nmarkupsafe\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "click=click" in stdout
+        assert "escaped=&lt;ok&gt;" in stdout
+
+
+    def test_numpy(self, tmp):
+        """NumPy (heavy C extensions, BLAS, etc.) should build and run."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import numpy as np
+                a = np.array([1, 2, 3])
+                b = np.array([4, 5, 6])
+                print(f"dot={np.dot(a, b)}")
+                print(f"sum={a.sum()}")
+                print(f"shape={a.shape}")
+                print(f"dtype={a.dtype}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("numpy\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "dot=32" in stdout
+        assert "sum=6" in stdout
+        assert "shape=(3,)" in stdout
+        assert "dtype=int" in stdout
+
+    def test_pytorch(self, tmp):
+        """PyTorch (large native extension) should build and run."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import torch
+                x = torch.tensor([1.0, 2.0, 3.0])
+                y = torch.tensor([4.0, 5.0, 6.0])
+                print(f"dot={torch.dot(x, y).item()}")
+                print(f"sum={x.sum().item()}")
+                print(f"shape={tuple(x.shape)}")
+                print(f"device={x.device}")
+            """)
+        )
+        req = tmp / "requirements.txt"
+        # CPU-only torch to keep download manageable
+        req.write_text(
+            "--index-url https://download.pytorch.org/whl/cpu\n"
+            "torch\n"
+        )
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out, timeout=120)
+        assert rc == 0, f"stderr: {stderr}"
+        assert "dot=32.0" in stdout
+        assert "sum=6.0" in stdout
+        assert "shape=(3,)" in stdout
+        assert "device=cpu" in stdout
+
+
 # ── Test: environment variables ───────────────────────────────────────
 
 

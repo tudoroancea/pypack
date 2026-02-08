@@ -15,4 +15,7 @@ build-backend = "hatchling.build"
 include = ["pypack.py", "stub.c"]
 
 [dependency-groups]
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "pytest-xdist>=3.8.0",
+]
