@@ -158,6 +158,7 @@ This delegates all dependency resolution to uv, which understands `pyproject.tom
 | `--python` | Python version to bundle | `3.13` |
 | `-r, --requirements` | Path to `requirements.txt` | (none) |
 | `-p, --project` | Path to a project directory (or its `pyproject.toml`/`setup.py`); deps resolved by uv | (none) |
+| `--no-strip` | Don't strip unused stdlib modules (keeps tkinter, idlelib, test, etc.) | strip enabled |
 
 ## Examples
 
@@ -235,7 +236,7 @@ directly to remove this dependency.
 | **Mental model** | "zip on a runtime" | "freeze the world" | "embed in Rust" | "compile to C" |
 | **Build speed** | ~10s (mostly compression) | 30–120s | 60–300s | 60–600s |
 
-pypack trades features for simplicity. The entire tool is ~200 lines of C + ~300 lines
+pypack trades features for simplicity. The entire tool is ~200 lines of C + ~400 lines
 of Python, with no framework, no hooks system, no hidden imports database, and no
 compilation step for user code. It just glues a known-good Python runtime to a zip of
 your code using mechanisms (`zipimport`, zip-tail-append) that Python already has built in.
@@ -256,12 +257,13 @@ uv run pytest tests/ -v
 | macOS arm64 | ✅ |
 | Windows | ❌ (planned) |
 
-## Limitations (v0.3.0)
+## Limitations (v0.4.0)
 
 - **No cross-compilation.** The binary is built for the current platform only.
 - **Target needs zstd + tar.** The first run extracts the runtime using these tools.
-- **~15 MB minimum size.** The compressed Python runtime is the floor.
+- **~7 MB minimum size.** The stripped, compressed Python runtime is the floor (~15 MB with `--no-strip`).
 - **Native extensions extracted at first run.** Packages with `.so`/`.dylib` files are included in the zip but extracted to `~/.cache/pypack/` on first run since `zipimport` can't load native code directly.
+- **Stripped runtime omits tkinter/Tk.** If your app needs `tkinter`, use `--no-strip`.
 
 ## Roadmap
 
@@ -269,7 +271,7 @@ uv run pytest tests/ -v
 |---------|---------|-------------|
 | ~~**v0.2.0**~~ | ~~**Project deps (`pyproject.toml`, `setup.py`, `setup.cfg`)**~~ | ~~`--project` flag delegates dep resolution to uv, which handles all formats~~ ✅ |
 | ~~**v0.3.0**~~ | ~~**Native extensions**~~ | ~~Extract `.so`/`.dylib` to cache at first run; use target Python for ABI-correct wheels~~ ✅ |
-| **v0.4.0** | **Stdlib tree-shaking** | Analyze imports → strip unused stdlib modules (`tkinter`, `test`, `idlelib`, etc.) to cut ~5–10 MB |
+| ~~**v0.4.0**~~ | ~~**Stdlib tree-shaking**~~ | ~~Strip unused stdlib modules (`tkinter`, `test`, `idlelib`, `ensurepip`, Tcl/Tk libs, `__pycache__`, etc.) — cuts ~50% off binary size; `--no-strip` to opt out~~ ✅ |
 | **v0.5.0** | **Layered caching** | Hash runtime/deps/app independently — skip re-extracting unchanged layers |
 | **v0.6.0** | **Windows** | Port stub to Win32 (`GetModuleFileName`, `CreateProcess`), produce `.exe` |
 | **v0.7.0** | **Cross-compilation** | `--target linux-x86_64` from macOS, using uv to fetch the target PBS release |

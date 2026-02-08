@@ -4,7 +4,7 @@
 
 **pypack** is a tool that bundles Python applications into single-binary executables powered by [uv](https://docs.astral.sh/uv/) and [python-build-standalone](https://github.com/astral-sh/python-build-standalone). It concatenates a compiled C stub, a compressed Python runtime, and a ZIP payload (user code + dependencies) into one file that is simultaneously a native executable and a valid ZIP archive.
 
-- **Version:** 0.2.0
+- **Version:** 0.4.0
 - **License:** MIT
 - **Platforms:** Linux x86_64/aarch64, macOS x86_64/arm64 (no Windows yet)
 
@@ -70,14 +70,15 @@ The trailer contains:
 - `runtime_size` (u64 LE)
 - `app_offset` (u64 LE)
 
-### Build Pipeline (6 steps)
+### Build Pipeline (7 steps)
 
 1. **Acquire Python** via `uv python install` + `uv python find`
 2. **Install dependencies** via `uv pip install --target` (from `-r` or `--project`)
 3. **Compile C stub** (`cc -O2 stub.c`) — tries static on Linux, falls back to dynamic
 4. **Create app ZIP** — `__main__.py` bootstrap + user code + site-packages
-5. **Compress runtime** — `tar | zstd -19` of the PBS installation
-6. **Assemble** — concatenate all parts + trailer
+5. **Prepare runtime** — copy PBS installation and strip unused stdlib modules (tkinter, idlelib, test, ensurepip, Tcl/Tk, __pycache__, etc.)
+6. **Compress runtime** — `tar | zstd -19` of the stripped installation
+7. **Assemble** — concatenate all parts + trailer
 
 ### Runtime Flow
 

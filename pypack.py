@@ -30,6 +30,46 @@ MAGIC = b"PYPK\x00\x01\x00\x00"
 TRAILER_SZ = 32
 STUB_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub.c")
 
+# Stdlib modules/directories that are safe to strip — large and rarely needed
+# at runtime by typical CLI/server applications.
+STRIP_STDLIB_DIRS = [
+    # Test infrastructure (huge, never needed at runtime)
+    "test",
+    # GUI / Tk
+    "tkinter",
+    "turtledemo",
+    "idlelib",
+    # Package management (not needed inside a packed binary)
+    "ensurepip",
+    # Documentation
+    "pydoc_data",
+    # Deprecated / compat
+    "lib2to3",
+    "distutils",
+]
+
+STRIP_STDLIB_FILES = [
+    "turtle.py",
+]
+
+# Top-level dirs outside lib/pythonX.Y that are safe to remove
+STRIP_TOPLEVEL_DIRS = [
+    "include",      # C headers — not needed at runtime
+    "share",        # man pages, etc.
+]
+
+# Lib-level dirs (siblings to lib/pythonX.Y) that are tk/tcl related
+STRIP_LIB_PATTERNS = [
+    "tcl",          # matches tcl8.6, tcl8, etc.
+    "tk",           # matches tk8.6
+    "itcl",         # Tcl extension
+    "tdbc",         # Tcl extension
+    "thread",       # Tcl threading extension
+    "libtcl",       # shared libraries
+    "libtk",        # shared libraries
+    "Tix",          # Tk extension
+]
+
 
 # ── Utility ───────────────────────────────────────────────────────────
 
@@ -48,7 +88,7 @@ def require_tool(name, install_hint=None):
 
 def uv_ensure_python(version):
     """Install and locate a Python interpreter via uv."""
-    print(f"[1/6] Acquiring Python {version} via uv...")
+    print(f"[1/7] Acquiring Python {version} via uv...")
     subprocess.run(["uv", "python", "install", version],
                    check=True, capture_output=True)
     r = subprocess.run(
@@ -106,7 +146,7 @@ def _check_native_extensions(target_dir):
 
 def uv_install_deps(python_path, req_file, target_dir):
     """Install pure-Python dependencies via 'uv pip install --target'."""
-    print(f"[2/6] Installing dependencies via uv pip...")
+    print(f"[2/7] Installing dependencies via uv pip...")
     os.makedirs(target_dir, exist_ok=True)
     subprocess.run([
         "uv", "pip", "install",
@@ -126,7 +166,7 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
     setup.py, setup.cfg. Uses 'uv pip compile' to resolve deps from
     the project metadata, then 'uv pip install' to install them.
     """
-    print(f"[2/6] Installing project dependencies via uv pip...")
+    print(f"[2/7] Installing project dependencies via uv pip...")
 
     # Find the project metadata file
     for name in ("pyproject.toml", "setup.cfg", "setup.py"):
@@ -175,11 +215,86 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
     _check_native_extensions(target_dir)
 
 
+# ── Stdlib tree-shaking ───────────────────────────────────────────────
+
+def _find_lib_python(install_dir):
+    """Find the lib/pythonX.Y directory inside a PBS installation."""
+    import glob
+    patterns = [
+        os.path.join(install_dir, "lib", "python3.*"),
+        os.path.join(install_dir, "install", "lib", "python3.*"),
+        os.path.join(install_dir, "python", "install", "lib", "python3.*"),
+    ]
+    for pat in patterns:
+        matches = glob.glob(pat)
+        if matches:
+            return matches[0]
+    return None
+
+
+def strip_runtime(install_dir):
+    """Strip unused stdlib modules and support files from a runtime copy.
+
+    Removes large modules that are almost never needed at runtime:
+    tkinter, idlelib, test, ensurepip, turtledemo, pydoc_data, etc.
+    Also removes Tcl/Tk shared libraries and C headers.
+
+    Returns the total bytes saved.
+    """
+    saved = 0
+
+    def _rm(path):
+        nonlocal saved
+        if os.path.isdir(path):
+            for root, dirs, files in os.walk(path):
+                for f in files:
+                    saved += os.path.getsize(os.path.join(root, f))
+            shutil.rmtree(path)
+        elif os.path.isfile(path):
+            saved += os.path.getsize(path)
+            os.unlink(path)
+
+    # 1. Strip top-level dirs (include/, share/)
+    for d in STRIP_TOPLEVEL_DIRS:
+        p = os.path.join(install_dir, d)
+        _rm(p)
+
+    # 2. Find lib/pythonX.Y and strip stdlib modules
+    lib_python = _find_lib_python(install_dir)
+    if lib_python:
+        for d in STRIP_STDLIB_DIRS:
+            _rm(os.path.join(lib_python, d))
+        for f in STRIP_STDLIB_FILES:
+            _rm(os.path.join(lib_python, f))
+
+        # Strip __pycache__ dirs (pyc files, can be regenerated)
+        for root, dirs, files in os.walk(lib_python):
+            for d in dirs[:]:
+                if d == "__pycache__":
+                    _rm(os.path.join(root, d))
+                    dirs.remove(d)
+
+        # Strip site-packages (PBS ships pip, not needed)
+        _rm(os.path.join(lib_python, "site-packages"))
+
+    # 3. Strip Tcl/Tk libraries from lib/
+    lib_dir = os.path.dirname(lib_python) if lib_python else os.path.join(install_dir, "lib")
+    if os.path.isdir(lib_dir):
+        for entry in os.listdir(lib_dir):
+            entry_lower = entry.lower()
+            for pattern in STRIP_LIB_PATTERNS:
+                if entry_lower.startswith(pattern):
+                    _rm(os.path.join(lib_dir, entry))
+                    break
+
+    return saved
+
+
 # ── Stub compilation ─────────────────────────────────────────────────
 
 def compile_stub(work_dir):
     """Compile the C stub for the current platform."""
-    print("[3/6] Compiling C stub...")
+    print("[3/7] Compiling C stub...")
 
     # Check for pre-built stubs first
     plat = f"{platform.system().lower()}-{platform.machine().lower()}"
@@ -355,7 +470,7 @@ _pypack_main()
 
 def make_app_zip(entry_path, deps_dir=None):
     """Create the in-memory ZIP payload containing bootstrap + code + deps."""
-    print("[4/6] Creating app payload...")
+    print("[4/7] Creating app payload...")
     buf = io.BytesIO()
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
@@ -401,9 +516,28 @@ def make_app_zip(entry_path, deps_dir=None):
 
 # ── Runtime compression ──────────────────────────────────────────────
 
+def prepare_runtime(install_dir, work_dir, do_strip=True):
+    """Copy the runtime to work_dir and optionally strip unused stdlib modules.
+
+    Returns the path to the (possibly stripped) runtime directory.
+    """
+    runtime_copy = os.path.join(work_dir, "runtime")
+    print(f"[5/7] Preparing Python runtime...")
+    shutil.copytree(install_dir, runtime_copy, symlinks=True)
+
+    if do_strip:
+        saved = strip_runtime(runtime_copy)
+        mb_saved = saved / 1024 / 1024
+        print(f"       Stripped {mb_saved:.1f} MB of unused stdlib modules")
+    else:
+        print("       Skipping stdlib stripping (--no-strip)")
+
+    return runtime_copy
+
+
 def compress_runtime(install_dir, output_path):
     """Tar + zstd-compress the Python installation directory."""
-    print(f"[5/6] Compressing Python runtime...")
+    print(f"[6/7] Compressing Python runtime...")
     cmd = f"tar -cf - -C '{install_dir}' . | zstd -19 -q -o '{output_path}'"
     subprocess.run(cmd, shell=True, check=True)
     mb = os.path.getsize(output_path) / 1024 / 1024
@@ -414,7 +548,7 @@ def compress_runtime(install_dir, output_path):
 
 def assemble(stub_path, runtime_path, app_zip_bytes, output_path):
     """Concatenate stub + runtime + app_zip + trailer → final binary."""
-    print("[6/6] Assembling binary...")
+    print("[7/7] Assembling binary...")
 
     with open(output_path, "wb") as out:
         # 1. Stub
@@ -465,6 +599,8 @@ def cmd_build(args):
     if args.requirements and args.project:
         die("Cannot use both --requirements and --project at the same time.")
 
+    do_strip = not args.no_strip
+
     python_version = args.python or "3.13"
 
     # Resolve --project to a directory
@@ -485,6 +621,7 @@ def cmd_build(args):
         print(f"  deps:    {args.requirements}")
     if project_dir:
         print(f"  project: {project_dir}")
+    print(f"  strip:   {'yes' if do_strip else 'no'}")
     print()
 
     with tempfile.TemporaryDirectory(prefix="pypack-") as work_dir:
@@ -509,11 +646,14 @@ def cmd_build(args):
         # 4. Create app ZIP
         app_zip = make_app_zip(entry, deps_dir)
 
-        # 5. Compress runtime
-        runtime_path = os.path.join(work_dir, "runtime.tar.zst")
-        compress_runtime(install_root, runtime_path)
+        # 5. Copy & strip runtime
+        runtime_dir = prepare_runtime(install_root, work_dir, do_strip=do_strip)
 
-        # 6. Assemble final binary
+        # 6. Compress runtime
+        runtime_path = os.path.join(work_dir, "runtime.tar.zst")
+        compress_runtime(runtime_dir, runtime_path)
+
+        # 7. Assemble final binary
         output = args.output
         os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
         assemble(stub_path, runtime_path, app_zip, output)
@@ -559,6 +699,11 @@ def main():
         "-p", "--project",
         help="Path to a project directory (or its pyproject.toml/setup.py); "
              "dependencies are resolved by uv",
+    )
+    build_parser.add_argument(
+        "--no-strip", action="store_true", default=False,
+        help="Don't strip unused stdlib modules from the runtime "
+             "(keeps tkinter, idlelib, test, etc.)",
     )
 
     args = parser.parse_args()

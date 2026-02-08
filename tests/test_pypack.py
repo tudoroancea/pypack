@@ -43,7 +43,8 @@ def tmp(tmp_path):
     return tmp_path
 
 
-def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION):
+def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION,
+           no_strip=False):
     """Helper: run pypack build and return the output path."""
     cmd = [
         sys.executable, PYPACK, "build",
@@ -55,6 +56,8 @@ def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION
         cmd += ["-r", requirements]
     if project:
         cmd += ["-p", project]
+    if no_strip:
+        cmd += ["--no-strip"]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         pytest.fail(
@@ -683,6 +686,110 @@ class TestProjectDeps:
             capture_output=True, text=True,
         )
         assert result.returncode != 0
+
+
+# ── Test: stdlib tree-shaking ──────────────────────────────────────────
+
+
+class TestStdlibStripping:
+    """Test that stdlib tree-shaking reduces binary size and still works."""
+
+    def test_stripped_smaller_than_full(self, tmp):
+        """Stripped binary should be significantly smaller than full."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        out_stripped = str(tmp / "bin_stripped")
+        out_full = str(tmp / "bin_full")
+
+        _build(str(pkg), out_stripped)
+        _build(str(pkg), out_full, no_strip=True)
+
+        sz_stripped = os.path.getsize(out_stripped)
+        sz_full = os.path.getsize(out_full)
+
+        # Stripped should be at least 30% smaller
+        ratio = sz_stripped / sz_full
+        assert ratio < 0.70, (
+            f"Stripped ({sz_stripped / 1024 / 1024:.1f} MB) should be <70% "
+            f"of full ({sz_full / 1024 / 1024:.1f} MB), got {ratio:.1%}"
+        )
+
+    def test_stripped_stdlib_still_works(self, tmp):
+        """A stripped binary using common stdlib modules should still run."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import json
+                import os
+                import sys
+                import pathlib
+                import hashlib
+                import re
+                import collections
+                import functools
+                import itertools
+                import io
+                print(json.dumps({"stdlib": "works", "pid": os.getpid()}))
+            """)
+        )
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out)
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0, f"stderr: {stderr}"
+        import json
+        data = json.loads(stdout.strip())
+        assert data["stdlib"] == "works"
+
+    def test_no_strip_flag(self, tmp):
+        """--no-strip should preserve the full runtime."""
+        pkg = tmp / "app"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text("print('ok')")
+
+        out = str(tmp / "bin")
+        result = subprocess.run(
+            [sys.executable, PYPACK, "build",
+             "--entry", str(pkg), "-o", out, "--no-strip"],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert result.returncode == 0
+        assert "Skipping stdlib stripping" in result.stdout
+
+        stdout, stderr, rc = _run(out)
+        assert rc == 0
+
+    def test_stripped_with_deps(self, tmp):
+        """Stripping should work correctly when dependencies are present."""
+        pkg = tmp / "cli"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "__main__.py").write_text(
+            textwrap.dedent("""\
+                import click
+                @click.command()
+                @click.option("--name", default="world")
+                def main(name):
+                    click.echo(f"Hello, {name}!")
+                main()
+            """)
+        )
+        req = tmp / "requirements.txt"
+        req.write_text("click\n")
+
+        out = str(tmp / "bin")
+        _build(str(pkg), out, requirements=str(req))
+
+        stdout, stderr, rc = _run(out, "--name", "stripped")
+        assert rc == 0, f"stderr: {stderr}"
+        assert "Hello, stripped!" in stdout
 
 
 class TestErrorHandling:
