@@ -6,18 +6,16 @@ They require: uv, zstd, tar, cc (clang or gcc).
 """
 
 import os
-import platform
 import shutil
 import struct
 import subprocess
 import sys
-import tempfile
 import textwrap
 import zipfile
 
 import pytest
 
-PYPACK = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pypack.py")
+PYPACK_CMD = os.path.join(sys.prefix, "bin", "pypack")
 PYTHON_VERSION = "3.13"
 
 # Skip all tests if tools are missing
@@ -43,14 +41,26 @@ def tmp(tmp_path):
     return tmp_path
 
 
-def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION,
-           no_strip=False, no_cache=False, env=None):
+def _build(
+    entry,
+    output,
+    requirements=None,
+    project=None,
+    python=PYTHON_VERSION,
+    no_strip=False,
+    no_cache=False,
+    env=None,
+):
     """Helper: run pypack build and return the (output_path, stdout) tuple."""
     cmd = [
-        sys.executable, PYPACK, "build",
-        "--entry", entry,
-        "-o", output,
-        "--python", python,
+        PYPACK_CMD,
+        "build",
+        "--entry",
+        entry,
+        "-o",
+        output,
+        "--python",
+        python,
     ]
     if requirements:
         cmd += ["-r", requirements]
@@ -60,8 +70,7 @@ def _build(entry, output, requirements=None, project=None, python=PYTHON_VERSION
         cmd += ["--no-strip"]
     if no_cache:
         cmd += ["--no-cache"]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
-                            env=env)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     if result.returncode != 0:
         pytest.fail(
             f"pypack build failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -73,7 +82,9 @@ def _run(binary, *args, timeout=60):
     """Helper: run a packed binary and return (stdout, stderr, returncode)."""
     result = subprocess.run(
         [binary, *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     return result.stdout, result.stderr, result.returncode
 
@@ -115,7 +126,7 @@ class TestBinaryStructure:
             f.seek(-32, 2)
             trailer = f.read(32)
 
-        magic = trailer[:8]
+        _magic = trailer[:8]
         rt_off = struct.unpack("<Q", trailer[8:16])[0]
         rt_sz = struct.unpack("<Q", trailer[16:24])[0]
         app_off = struct.unpack("<Q", trailer[24:32])[0]
@@ -266,6 +277,7 @@ class TestScriptEntry:
         stdout, _, rc = _run(out)
         assert rc == 0
         import json
+
         data = json.loads(stdout.strip())
         assert "pid" in data
 
@@ -363,7 +375,8 @@ class TestNativeExtensions:
 
         with zipfile.ZipFile(out) as zf:
             native_files = [
-                n for n in zf.namelist()
+                n
+                for n in zf.namelist()
                 if any(n.endswith(ext) for ext in (".so", ".dylib", ".pyd"))
             ]
             assert len(native_files) > 0, "No native extensions in zip"
@@ -443,7 +456,6 @@ class TestNativeExtensions:
         assert "click=click" in stdout
         assert "escaped=&lt;ok&gt;" in stdout
 
-
     def test_numpy(self, tmp):
         """NumPy (heavy C extensions, BLAS, etc.) should build and run."""
         pkg = tmp / "app"
@@ -491,10 +503,7 @@ class TestNativeExtensions:
         )
         req = tmp / "requirements.txt"
         # CPU-only torch to keep download manageable
-        req.write_text(
-            "--index-url https://download.pytorch.org/whl/cpu\n"
-            "torch\n"
-        )
+        req.write_text("--index-url https://download.pytorch.org/whl/cpu\ntorch\n")
 
         out = str(tmp / "bin")
         _build(str(pkg), out, requirements=str(req))
@@ -681,12 +690,20 @@ class TestProjectDeps:
 
         out = str(tmp / "bin")
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg),
-             "-r", str(req),
-             "--project", str(tmp),
-             "-o", out],
-            capture_output=True, text=True,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                str(pkg),
+                "-r",
+                str(req),
+                "--project",
+                str(tmp),
+                "-o",
+                out,
+            ],
+            capture_output=True,
+            text=True,
         )
         assert result.returncode != 0
 
@@ -747,6 +764,7 @@ class TestStdlibStripping:
         stdout, stderr, rc = _run(out)
         assert rc == 0, f"stderr: {stderr}"
         import json
+
         data = json.loads(stdout.strip())
         assert data["stdlib"] == "works"
 
@@ -759,9 +777,19 @@ class TestStdlibStripping:
 
         out = str(tmp / "bin")
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out, "--no-strip", "--no-cache"],
-            capture_output=True, text=True, timeout=300,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                str(pkg),
+                "-o",
+                out,
+                "--no-strip",
+                "--no-cache",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
         )
         assert result.returncode == 0
         assert "Skipping stdlib stripping" in result.stdout
@@ -802,10 +830,16 @@ class TestErrorHandling:
         """Should fail if entry point doesn't exist."""
         out = str(tmp / "bin")
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", "/nonexistent/path",
-             "-o", out],
-            capture_output=True, text=True,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                "/nonexistent/path",
+                "-o",
+                out,
+            ],
+            capture_output=True,
+            text=True,
         )
         assert result.returncode != 0
 
@@ -818,10 +852,9 @@ class TestErrorHandling:
 
         out = str(tmp / "bin")
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg),
-             "-o", out],
-            capture_output=True, text=True,
+            [PYPACK_CMD, "build", "--entry", str(pkg), "-o", out],
+            capture_output=True,
+            text=True,
         )
         assert result.returncode != 0
 
@@ -902,9 +935,11 @@ class TestBuildCache:
 
         # Second build — should use cache
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out],
-            capture_output=True, text=True, timeout=300, env=env,
+            [PYPACK_CMD, "build", "--entry", str(pkg), "-o", out],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         assert result.returncode == 0
         assert "Using cached stub" in result.stdout
@@ -953,9 +988,19 @@ class TestBuildCache:
 
         # Second build with --no-cache — should NOT use cache
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out, "--no-cache"],
-            capture_output=True, text=True, timeout=300, env=env,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                str(pkg),
+                "-o",
+                out,
+                "--no-cache",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         assert result.returncode == 0
         assert "Using cached stub" not in result.stdout
@@ -967,7 +1012,9 @@ class TestBuildCache:
         pkg = tmp / "cli"
         pkg.mkdir()
         (pkg / "__init__.py").write_text("")
-        (pkg / "__main__.py").write_text("import click; print(f'click={click.__name__}')")
+        (pkg / "__main__.py").write_text(
+            "import click; print(f'click={click.__name__}')"
+        )
         req = tmp / "requirements.txt"
         req.write_text("click\n")
 
@@ -984,9 +1031,20 @@ class TestBuildCache:
 
         # Second build should use cached deps
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out, "-r", str(req)],
-            capture_output=True, text=True, timeout=300, env=env,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                str(pkg),
+                "-o",
+                out,
+                "-r",
+                str(req),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         assert result.returncode == 0
         assert "Using cached dependencies" in result.stdout
@@ -1029,9 +1087,20 @@ class TestBuildCache:
 
         # Second build — deps cache should miss
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out, "-r", str(req)],
-            capture_output=True, text=True, timeout=300, env=env,
+            [
+                PYPACK_CMD,
+                "build",
+                "--entry",
+                str(pkg),
+                "-o",
+                out,
+                "-r",
+                str(req),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         assert result.returncode == 0
         # Should NOT use cached deps (different requirements)
@@ -1063,9 +1132,11 @@ class TestBuildCache:
 
         # Second build — all layers should be cached
         result = subprocess.run(
-            [sys.executable, PYPACK, "build",
-             "--entry", str(pkg), "-o", out],
-            capture_output=True, text=True, timeout=300, env=env,
+            [PYPACK_CMD, "build", "--entry", str(pkg), "-o", out],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=env,
         )
         assert result.returncode == 0
         assert "Using cached stub" in result.stdout
@@ -1099,8 +1170,10 @@ class TestClean:
 
         # Clean
         result = subprocess.run(
-            [sys.executable, PYPACK, "clean"],
-            capture_output=True, text=True, env=env,
+            [PYPACK_CMD, "clean"],
+            capture_output=True,
+            text=True,
+            env=env,
         )
         assert result.returncode == 0
         assert "Cleaned build cache" in result.stdout
@@ -1112,8 +1185,10 @@ class TestClean:
         env["XDG_CACHE_HOME"] = str(tmp / "empty_cache")
 
         result = subprocess.run(
-            [sys.executable, PYPACK, "clean"],
-            capture_output=True, text=True, env=env,
+            [PYPACK_CMD, "clean"],
+            capture_output=True,
+            text=True,
+            env=env,
         )
         assert result.returncode == 0
         assert "No build cache" in result.stdout

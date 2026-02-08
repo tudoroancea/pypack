@@ -1,4 +1,5 @@
 """A simple single-file script example."""
+
 import sys
 import json
 

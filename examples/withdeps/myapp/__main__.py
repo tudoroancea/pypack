@@ -1,4 +1,4 @@
-import click
+import click  # ty:ignore[unresolved-import]
 
 
 @click.command()

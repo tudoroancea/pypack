@@ -5,7 +5,7 @@ Single-binary Python apps, powered by [uv](https://docs.astral.sh/uv/).
 Turn any pure-Python project into a single executable. No Python installed on the target. No virtualenv. Just `./myapp`.
 
 ```
-$ python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+$ pypack build --entry myapp/ -r requirements.txt -o dist/myapp
 [✓] Build complete!
 
 $ scp dist/myapp server:~/
@@ -123,7 +123,7 @@ AND a zip archive. When Python is invoked as `python ./myapp`, zipimport finds
 ### Package with `__main__.py`
 
 ```bash
-python pypack.py build \
+pypack build \
     --entry myapp/ \
     -r requirements.txt \
     -o dist/myapp \
@@ -133,7 +133,7 @@ python pypack.py build \
 ### Single script
 
 ```bash
-python pypack.py build \
+pypack build \
     --entry script.py \
     -o dist/script
 ```
@@ -141,7 +141,7 @@ python pypack.py build \
 ### From a project (`pyproject.toml`, `setup.py`, `setup.cfg`)
 
 ```bash
-python pypack.py build \
+pypack build \
     --entry myapp/ \
     -p . \
     -o dist/myapp
@@ -178,7 +178,7 @@ main()
 ```
 
 ```bash
-python pypack.py build --entry myapp/ -o dist/hello
+pypack build --entry myapp/ -o dist/hello
 ./dist/hello pypack
 # Hello, pypack!
 ```
@@ -199,7 +199,7 @@ main()
 
 ```bash
 echo "click" > requirements.txt
-python pypack.py build --entry cli/ -r requirements.txt -o dist/cli
+pypack build --entry cli/ -r requirements.txt -o dist/cli
 ./dist/cli --name pypack
 # Hello, pypack!
 ```
@@ -225,13 +225,13 @@ pypack caches expensive build artifacts so that rebuilds are fast when only your
 
 ```bash
 # First build — populates cache
-python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+pypack build --entry myapp/ -r requirements.txt -o dist/myapp
 # [3/7] Compiling C stub...
 # [5/7] Preparing Python runtime...
 # [6/7] Compressing Python runtime... 7.2 MB
 
 # Second build (only app code changed) — uses cache
-python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+pypack build --entry myapp/ -r requirements.txt -o dist/myapp
 # [3/7] Compiling C stub... Using cached stub
 # [5/7] Using cached runtime...
 # [6/7] Using cached runtime... (7.2 MB)
@@ -241,13 +241,13 @@ Cache location: `~/.cache/pypack/build/` (respects `XDG_CACHE_HOME`).
 
 ```bash
 # Force a full rebuild
-python pypack.py build --entry myapp/ -o dist/myapp --no-cache
+pypack build --entry myapp/ -o dist/myapp --no-cache
 
 # Clean the build cache
-python pypack.py clean
+pypack clean
 
 # Clean all caches (build + runtime extraction)
-python pypack.py clean --all
+pypack clean --all
 ```
 
 ## Stub compilation notes

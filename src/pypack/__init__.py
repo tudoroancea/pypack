@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 pypack — Build single-binary Python executables powered by uv.
 
@@ -55,24 +54,25 @@ STRIP_STDLIB_FILES = [
 
 # Top-level dirs outside lib/pythonX.Y that are safe to remove
 STRIP_TOPLEVEL_DIRS = [
-    "include",      # C headers — not needed at runtime
-    "share",        # man pages, etc.
+    "include",  # C headers — not needed at runtime
+    "share",  # man pages, etc.
 ]
 
 # Lib-level dirs (siblings to lib/pythonX.Y) that are tk/tcl related
 STRIP_LIB_PATTERNS = [
-    "tcl",          # matches tcl8.6, tcl8, etc.
-    "tk",           # matches tk8.6
-    "itcl",         # Tcl extension
-    "tdbc",         # Tcl extension
-    "thread",       # Tcl threading extension
-    "libtcl",       # shared libraries
-    "libtk",        # shared libraries
-    "Tix",          # Tk extension
+    "tcl",  # matches tcl8.6, tcl8, etc.
+    "tk",  # matches tk8.6
+    "itcl",  # Tcl extension
+    "tdbc",  # Tcl extension
+    "thread",  # Tcl threading extension
+    "libtcl",  # shared libraries
+    "libtk",  # shared libraries
+    "Tix",  # Tk extension
 ]
 
 
 # ── Utility ───────────────────────────────────────────────────────────
+
 
 def die(msg):
     print(f"\n  ERROR: {msg}", file=sys.stderr)
@@ -86,6 +86,7 @@ def require_tool(name, install_hint=None):
 
 
 # ── Build cache ───────────────────────────────────────────────────────
+
 
 def _build_cache_dir():
     """Return the root directory for the build cache."""
@@ -125,7 +126,8 @@ def _cache_save_dir(src_dir, dst_tar):
         os.makedirs(os.path.dirname(dst_tar), exist_ok=True)
         subprocess.run(
             ["tar", "-cf", dst_tar, "-C", src_dir, "."],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
     except (OSError, subprocess.CalledProcessError) as e:
         print(f"       Warning: could not save deps to build cache: {e}")
@@ -139,7 +141,8 @@ def _cache_restore_dir(src_tar, dst_dir):
         os.makedirs(dst_dir, exist_ok=True)
         subprocess.run(
             ["tar", "-xf", src_tar, "-C", dst_dir],
-            check=True, capture_output=True,
+            check=True,
+            capture_output=True,
         )
         return True
     except (OSError, subprocess.CalledProcessError):
@@ -149,24 +152,22 @@ def _cache_restore_dir(src_tar, dst_dir):
 def _stub_cache_key():
     """Cache key for the compiled C stub."""
     plat = f"{platform.system().lower()}-{platform.machine().lower()}"
-    return _sha256(
-        f"{_sha256_file(STUB_SRC)}|{plat}|{os.environ.get('CC', 'cc')}"
-    )
+    return _sha256(f"{_sha256_file(STUB_SRC)}|{plat}|{os.environ.get('CC', 'cc')}")
 
 
 def _runtime_cache_key(python_path, do_strip):
     """Cache key for the stripped + compressed runtime."""
     install_root = uv_install_root(python_path)
     real_root = os.path.realpath(install_root)
-    strip_config = "|".join([
-        ",".join(sorted(STRIP_STDLIB_DIRS)),
-        ",".join(sorted(STRIP_STDLIB_FILES)),
-        ",".join(sorted(STRIP_TOPLEVEL_DIRS)),
-        ",".join(sorted(STRIP_LIB_PATTERNS)),
-    ])
-    return _sha256(
-        f"{real_root}|{'strip' if do_strip else 'nostrip'}|{strip_config}"
+    strip_config = "|".join(
+        [
+            ",".join(sorted(STRIP_STDLIB_DIRS)),
+            ",".join(sorted(STRIP_STDLIB_FILES)),
+            ",".join(sorted(STRIP_TOPLEVEL_DIRS)),
+            ",".join(sorted(STRIP_LIB_PATTERNS)),
+        ]
     )
+    return _sha256(f"{real_root}|{'strip' if do_strip else 'nostrip'}|{strip_config}")
 
 
 def _deps_cache_key(python_path, req_file=None, project_dir=None):
@@ -185,14 +186,18 @@ def _deps_cache_key(python_path, req_file=None, project_dir=None):
 
 # ── uv integration ───────────────────────────────────────────────────
 
+
 def uv_ensure_python(version):
     """Install and locate a Python interpreter via uv."""
     print(f"[1/7] Acquiring Python {version} via uv...")
-    subprocess.run(["uv", "python", "install", version],
-                   check=True, capture_output=True)
+    subprocess.run(
+        ["uv", "python", "install", version], check=True, capture_output=True
+    )
     r = subprocess.run(
         ["uv", "python", "find", version],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     py = r.stdout.strip()
     if not os.path.isfile(py):
@@ -214,7 +219,7 @@ def uv_install_root(python_path):
     parts = python_path.split(os.sep)
     for i, part in enumerate(parts):
         if part.startswith("cpython-") or part.startswith("pypy-"):
-            return os.sep + os.path.join(*parts[1:i + 1])
+            return os.sep + os.path.join(*parts[1 : i + 1])
 
     # Fallback: assume layout is .../bin/python3, walk up
     bin_dir = os.path.dirname(python_path)
@@ -230,9 +235,7 @@ def _check_native_extensions(target_dir):
     for root, _, files in os.walk(target_dir):
         for f in files:
             if f.endswith((".so", ".dylib", ".pyd")):
-                native_files.append(
-                    os.path.relpath(os.path.join(root, f), target_dir)
-                )
+                native_files.append(os.path.relpath(os.path.join(root, f), target_dir))
 
     if native_files:
         print(f"       Native extensions found ({len(native_files)} files):")
@@ -245,15 +248,23 @@ def _check_native_extensions(target_dir):
 
 def uv_install_deps(python_path, req_file, target_dir):
     """Install pure-Python dependencies via 'uv pip install --target'."""
-    print(f"[2/7] Installing dependencies via uv pip...")
+    print("[2/7] Installing dependencies via uv pip...")
     os.makedirs(target_dir, exist_ok=True)
-    subprocess.run([
-        "uv", "pip", "install",
-        "--python", python_path,
-        "--target", target_dir,
-        "-r", req_file,
-        "--no-compile",
-    ], check=True)
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            python_path,
+            "--target",
+            target_dir,
+            "-r",
+            req_file,
+            "--no-compile",
+        ],
+        check=True,
+    )
 
     _check_native_extensions(target_dir)
 
@@ -265,7 +276,7 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
     setup.py, setup.cfg. Uses 'uv pip compile' to resolve deps from
     the project metadata, then 'uv pip install' to install them.
     """
-    print(f"[2/7] Installing project dependencies via uv pip...")
+    print("[2/7] Installing project dependencies via uv pip...")
 
     # Find the project metadata file
     for name in ("pyproject.toml", "setup.cfg", "setup.py"):
@@ -278,15 +289,17 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
     # Resolve dependencies to a pinned requirements list
     r = subprocess.run(
         ["uv", "pip", "compile", "--python", python_path, src],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if r.returncode != 0:
         die(f"uv pip compile failed:\n{r.stderr}")
 
     # Filter out comments and blank lines
     lines = [
-        l.strip() for l in r.stdout.splitlines()
-        if l.strip() and not l.strip().startswith("#")
+        line.strip()
+        for line in r.stdout.splitlines()
+        if line.strip() and not line.strip().startswith("#")
     ]
     if not lines:
         print("       No dependencies found.")
@@ -301,13 +314,21 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
         tmp_path = tmp.name
 
     try:
-        subprocess.run([
-            "uv", "pip", "install",
-            "--python", python_path,
-            "--target", target_dir,
-            "-r", tmp_path,
-            "--no-compile",
-        ], check=True)
+        subprocess.run(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                python_path,
+                "--target",
+                target_dir,
+                "-r",
+                tmp_path,
+                "--no-compile",
+            ],
+            check=True,
+        )
     finally:
         os.unlink(tmp_path)
 
@@ -316,9 +337,11 @@ def uv_install_project_deps(python_path, project_dir, target_dir):
 
 # ── Stdlib tree-shaking ───────────────────────────────────────────────
 
+
 def _find_lib_python(install_dir):
     """Find the lib/pythonX.Y directory inside a PBS installation."""
     import glob
+
     patterns = [
         os.path.join(install_dir, "lib", "python3.*"),
         os.path.join(install_dir, "install", "lib", "python3.*"),
@@ -377,7 +400,9 @@ def strip_runtime(install_dir):
         _rm(os.path.join(lib_python, "site-packages"))
 
     # 3. Strip Tcl/Tk libraries from lib/
-    lib_dir = os.path.dirname(lib_python) if lib_python else os.path.join(install_dir, "lib")
+    lib_dir = (
+        os.path.dirname(lib_python) if lib_python else os.path.join(install_dir, "lib")
+    )
     if os.path.isdir(lib_dir):
         for entry in os.listdir(lib_dir):
             entry_lower = entry.lower()
@@ -390,6 +415,7 @@ def strip_runtime(install_dir):
 
 
 # ── Stub compilation ─────────────────────────────────────────────────
+
 
 def compile_stub(work_dir, use_cache=True):
     """Compile the C stub for the current platform."""
@@ -450,6 +476,7 @@ def compile_stub(work_dir, use_cache=True):
 
 # ── App ZIP payload ──────────────────────────────────────────────────
 
+
 def _make_bootstrap(entry_path):
     """Generate the __main__.py bootstrap that goes inside the zip."""
     is_package = os.path.isdir(entry_path)
@@ -457,15 +484,13 @@ def _make_bootstrap(entry_path):
     if is_package:
         module_name = os.path.basename(os.path.normpath(entry_path))
         run_stmt = (
-            f'runpy.run_module("{module_name}", '
-            f'run_name="__main__", alter_sys=True)'
+            f'runpy.run_module("{module_name}", run_name="__main__", alter_sys=True)'
         )
     else:
         # For single scripts, we store them as _pypack_entry.py in the zip
         # to avoid name collisions and use run_module to execute them
         run_stmt = (
-            'runpy.run_module("_pypack_entry", '
-            'run_name="__main__", alter_sys=True)'
+            'runpy.run_module("_pypack_entry", run_name="__main__", alter_sys=True)'
         )
 
     return f'''"""pypack bootstrap — auto-generated, do not edit."""
@@ -596,8 +621,7 @@ def make_app_zip(entry_path, deps_dir=None):
             base = os.path.dirname(os.path.normpath(entry_path))
             for root, dirs, files in os.walk(entry_path):
                 dirs[:] = [
-                    d for d in dirs
-                    if d != "__pycache__" and not d.startswith(".")
+                    d for d in dirs if d != "__pycache__" and not d.startswith(".")
                 ]
                 for f in files:
                     if f.endswith((".pyc", ".pyo")):
@@ -630,13 +654,14 @@ def make_app_zip(entry_path, deps_dir=None):
 
 # ── Runtime compression ──────────────────────────────────────────────
 
+
 def prepare_runtime(install_dir, work_dir, do_strip=True):
     """Copy the runtime to work_dir and optionally strip unused stdlib modules.
 
     Returns the path to the (possibly stripped) runtime directory.
     """
     runtime_copy = os.path.join(work_dir, "runtime")
-    print(f"[5/7] Preparing Python runtime...")
+    print("[5/7] Preparing Python runtime...")
     shutil.copytree(install_dir, runtime_copy, symlinks=True)
 
     if do_strip:
@@ -651,7 +676,7 @@ def prepare_runtime(install_dir, work_dir, do_strip=True):
 
 def compress_runtime(install_dir, output_path):
     """Tar + zstd-compress the Python installation directory."""
-    print(f"[6/7] Compressing Python runtime...")
+    print("[6/7] Compressing Python runtime...")
     cmd = f"tar -cf - -C '{install_dir}' . | zstd -19 -q -o '{output_path}'"
     subprocess.run(cmd, shell=True, check=True)
     mb = os.path.getsize(output_path) / 1024 / 1024
@@ -659,6 +684,7 @@ def compress_runtime(install_dir, output_path):
 
 
 # ── Final assembly ───────────────────────────────────────────────────
+
 
 def assemble(stub_path, runtime_path, app_zip_bytes, output_path):
     """Concatenate stub + runtime + app_zip + trailer → final binary."""
@@ -681,10 +707,10 @@ def assemble(stub_path, runtime_path, app_zip_bytes, output_path):
         out.write(app_zip_bytes)
 
         # 4. Trailer (32 bytes)
-        out.write(MAGIC)                                     # 8 bytes
-        out.write(struct.pack("<Q", runtime_offset))         # 8 bytes
-        out.write(struct.pack("<Q", runtime_size))           # 8 bytes
-        out.write(struct.pack("<Q", app_offset))             # 8 bytes
+        out.write(MAGIC)  # 8 bytes
+        out.write(struct.pack("<Q", runtime_offset))  # 8 bytes
+        out.write(struct.pack("<Q", runtime_size))  # 8 bytes
+        out.write(struct.pack("<Q", app_offset))  # 8 bytes
 
     os.chmod(output_path, 0o755)
 
@@ -693,6 +719,7 @@ def assemble(stub_path, runtime_path, app_zip_bytes, output_path):
 
 
 # ── Build command ────────────────────────────────────────────────────
+
 
 def cmd_build(args):
     """Execute the full build pipeline."""
@@ -728,7 +755,7 @@ def cmd_build(args):
         if not os.path.isdir(project_dir):
             die(f"Project directory not found: {project_dir}")
 
-    print(f"\n  pypack build")
+    print("\n  pypack build")
     print(f"  entry:   {entry}")
     print(f"  python:  {python_version}")
     print(f"  output:  {args.output}")
@@ -755,10 +782,14 @@ def cmd_build(args):
 
             if use_cache:
                 deps_key = _deps_cache_key(
-                    python_path, args.requirements, project_dir,
+                    python_path,
+                    args.requirements,
+                    project_dir,
                 )
                 cached_deps = os.path.join(
-                    _build_cache_dir(), "deps", f"{deps_key}.tar",
+                    _build_cache_dir(),
+                    "deps",
+                    f"{deps_key}.tar",
                 )
                 if _cache_restore_dir(cached_deps, deps_dir):
                     print("[2/7] Using cached dependencies...")
@@ -787,18 +818,22 @@ def cmd_build(args):
         if use_cache:
             rt_key = _runtime_cache_key(python_path, do_strip)
             cached_runtime = os.path.join(
-                _build_cache_dir(), "runtimes", f"{rt_key}.tar.zst",
+                _build_cache_dir(),
+                "runtimes",
+                f"{rt_key}.tar.zst",
             )
             if os.path.isfile(cached_runtime):
                 shutil.copy2(cached_runtime, runtime_path)
                 mb = os.path.getsize(runtime_path) / 1024 / 1024
-                print(f"[5/7] Using cached runtime...")
+                print("[5/7] Using cached runtime...")
                 print(f"[6/7] Using cached runtime... ({mb:.1f} MB)")
                 runtime_cache_hit = True
 
         if not runtime_cache_hit:
             runtime_dir = prepare_runtime(
-                install_root, work_dir, do_strip=do_strip,
+                install_root,
+                work_dir,
+                do_strip=do_strip,
             )
             compress_runtime(runtime_dir, runtime_path)
             # Save compressed runtime to build cache
@@ -810,13 +845,14 @@ def cmd_build(args):
         os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
         assemble(stub_path, runtime_path, app_zip, output)
 
-    print(f"\n  [✓] Build complete!")
+    print("\n  [✓] Build complete!")
     print(f"      Run with: ./{output}")
-    print(f"      First run extracts the runtime to ~/.cache/pypack/")
-    print(f"      Subsequent runs start in ~100ms.\n")
+    print("      First run extracts the runtime to ~/.cache/pypack/")
+    print("      Subsequent runs start in ~100ms.\n")
 
 
 # ── Clean command ─────────────────────────────────────────────────────
+
 
 def cmd_clean(args):
     """Clean pypack caches."""
@@ -851,6 +887,7 @@ def cmd_clean(args):
 
 # ── CLI ──────────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(
         prog="pypack",
@@ -865,35 +902,45 @@ def main():
         help="Pack a Python app into a single executable",
     )
     build_parser.add_argument(
-        "--entry", required=True,
+        "--entry",
+        required=True,
         help="Entry point: a .py script or a package directory with __main__.py",
     )
     build_parser.add_argument(
-        "-o", "--output", required=True,
+        "-o",
+        "--output",
+        required=True,
         help="Path for the output binary",
     )
     build_parser.add_argument(
-        "--python", default="3.13",
+        "--python",
+        default="3.13",
         help="Python version to bundle (default: 3.13)",
     )
     build_parser.add_argument(
-        "-r", "--requirements",
+        "-r",
+        "--requirements",
         help="Path to requirements.txt for dependencies",
     )
     build_parser.add_argument(
-        "-p", "--project",
+        "-p",
+        "--project",
         help="Path to a project directory (or its pyproject.toml/setup.py); "
-             "dependencies are resolved by uv",
+        "dependencies are resolved by uv",
     )
     build_parser.add_argument(
-        "--no-strip", action="store_true", default=False,
+        "--no-strip",
+        action="store_true",
+        default=False,
         help="Don't strip unused stdlib modules from the runtime "
-             "(keeps tkinter, idlelib, test, etc.)",
+        "(keeps tkinter, idlelib, test, etc.)",
     )
     build_parser.add_argument(
-        "--no-cache", action="store_true", default=False,
+        "--no-cache",
+        action="store_true",
+        default=False,
         help="Disable build cache — force a full rebuild of all layers "
-             "(stub, runtime, dependencies)",
+        "(stub, runtime, dependencies)",
     )
 
     # clean subcommand
@@ -902,7 +949,9 @@ def main():
         help="Clean the pypack build cache",
     )
     clean_parser.add_argument(
-        "--all", action="store_true", default=False,
+        "--all",
+        action="store_true",
+        default=False,
         help="Clean all caches (build + runtime extraction cache)",
     )
 
@@ -914,7 +963,3 @@ def main():
         cmd_clean(args)
     else:
         parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
