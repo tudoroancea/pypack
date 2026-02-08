@@ -1,0 +1,18 @@
+[project]
+name = "pypack"
+version = "0.1.0"
+description = "Single-binary Python apps, powered by uv"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+scripts.pypack = "pypack:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["pypack.py", "stub.c"]
+
+[dependency-groups]
+dev = ["pytest"]

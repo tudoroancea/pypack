@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""
+pypack — Build single-binary Python executables powered by uv.
+
+Bundles a python-build-standalone runtime (via uv) with your code and
+pure-Python dependencies into a single executable file.
+
+Prerequisites:
+  - uv    (https://docs.astral.sh/uv/)
+  - zstd  (apt install zstd / brew install zstd)
+  - cc    (any C compiler: gcc, clang, etc.)
+
+Usage:
+  python pypack.py build --entry myapp/ -r requirements.txt -o dist/myapp
+  python pypack.py build --entry script.py -o dist/script --python 3.12
+"""
+
+import argparse
+import io
+import os
+import platform
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+MAGIC = b"PYPK\x00\x01\x00\x00"
+TRAILER_SZ = 32
+STUB_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stub.c")
+
+
+# ── Utility ───────────────────────────────────────────────────────────
+
+def die(msg):
+    print(f"\n  ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def require_tool(name, install_hint=None):
+    if shutil.which(name) is None:
+        hint = f" ({install_hint})" if install_hint else ""
+        die(f"'{name}' is not installed{hint}")
+
+
+# ── uv integration ───────────────────────────────────────────────────
+
+def uv_ensure_python(version):
+    """Install and locate a Python interpreter via uv."""
+    print(f"[1/6] Acquiring Python {version} via uv...")
+    subprocess.run(["uv", "python", "install", version],
+                   check=True, capture_output=True)
+    r = subprocess.run(
+        ["uv", "python", "find", version],
+        capture_output=True, text=True, check=True,
+    )
+    py = r.stdout.strip()
+    if not os.path.isfile(py):
+        die(f"uv python find returned non-existent path: {py}")
+    return py
+
+
+def uv_install_root(python_path):
+    """
+    Walk up from the interpreter binary to find the PBS installation root.
+
+    uv stores them at paths like:
+      ~/.local/share/uv/python/cpython-3.13.1-linux-x86_64-none/
+    The interpreter binary is somewhere like:
+      .../cpython-3.13.1-linux-x86_64-none/bin/python3
+    or:
+      .../cpython-3.13.1-linux-x86_64-none/install/bin/python3
+    """
+    parts = python_path.split(os.sep)
+    for i, part in enumerate(parts):
+        if part.startswith("cpython-") or part.startswith("pypy-"):
+            return os.sep + os.path.join(*parts[1:i + 1])
+
+    # Fallback: assume layout is .../bin/python3, walk up
+    bin_dir = os.path.dirname(python_path)
+    parent = os.path.dirname(bin_dir)
+    if os.path.isdir(os.path.join(parent, "lib")):
+        return parent
+    return os.path.dirname(parent)
+
+
+def uv_install_deps(python_path, req_file, target_dir):
+    """Install pure-Python dependencies via 'uv pip install --target'."""
+    print(f"[2/6] Installing dependencies via uv pip...")
+    os.makedirs(target_dir, exist_ok=True)
+    subprocess.run([
+        "uv", "pip", "install",
+        "--python", python_path,
+        "--target", target_dir,
+        "-r", req_file,
+        "--no-compile",
+    ], check=True)
+
+    # v1 safety net: fail the build if any native extensions snuck in
+    native_files = []
+    for root, _, files in os.walk(target_dir):
+        for f in files:
+            if f.endswith((".so", ".dylib", ".pyd")):
+                native_files.append(
+                    os.path.relpath(os.path.join(root, f), target_dir)
+                )
+
+    if native_files:
+        print("\n  Native extensions found in dependencies:", file=sys.stderr)
+        for nf in native_files[:10]:
+            print(f"    ✗ {nf}", file=sys.stderr)
+        if len(native_files) > 10:
+            print(f"    ... and {len(native_files) - 10} more", file=sys.stderr)
+        die(
+            "pypack v1 only supports pure-Python packages.\n"
+            "  Remove packages with C extensions and try again.\n"
+            "  Native extension support is planned for v2."
+        )
+
+
+# ── Stub compilation ─────────────────────────────────────────────────
+
+def compile_stub(work_dir):
+    """Compile the C stub for the current platform."""
+    print("[3/6] Compiling C stub...")
+
+    # Check for pre-built stubs first
+    plat = f"{platform.system().lower()}-{platform.machine().lower()}"
+    prebuilt_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stubs")
+    prebuilt = os.path.join(prebuilt_dir, f"stub-{plat}")
+    if os.path.isfile(prebuilt):
+        out = os.path.join(work_dir, "stub")
+        shutil.copy2(prebuilt, out)
+        print(f"       Using pre-built stub for {plat}")
+        return out
+
+    # Compile from source
+    if not os.path.isfile(STUB_SRC):
+        die(f"stub.c not found at {STUB_SRC}")
+
+    require_tool("cc", "install gcc or clang")
+
+    out = os.path.join(work_dir, "stub")
+    cc = os.environ.get("CC", "cc")
+
+    # Try static linking on Linux for maximum portability
+    if platform.system() == "Linux":
+        r = subprocess.run(
+            [cc, "-O2", "-s", "-static", "-o", out, STUB_SRC],
+            capture_output=True,
+        )
+        if r.returncode == 0:
+            print("       Compiled (static)")
+            return out
+        print("       Static linking failed, falling back to dynamic")
+        subprocess.run([cc, "-O2", "-s", "-o", out, STUB_SRC], check=True)
+    else:
+        # macOS: -s is not supported by Apple clang linker
+        subprocess.run([cc, "-O2", "-o", out, STUB_SRC], check=True)
+
+    print("       Compiled (dynamic)")
+    return out
+
+
+# ── App ZIP payload ──────────────────────────────────────────────────
+
+def _make_bootstrap(entry_path):
+    """Generate the __main__.py bootstrap that goes inside the zip."""
+    is_package = os.path.isdir(entry_path)
+
+    if is_package:
+        module_name = os.path.basename(os.path.normpath(entry_path))
+        run_stmt = (
+            f'runpy.run_module("{module_name}", '
+            f'run_name="__main__", alter_sys=True)'
+        )
+    else:
+        # For single scripts, we store them as _pypack_entry.py in the zip
+        # to avoid name collisions and use run_module to execute them
+        run_stmt = (
+            'runpy.run_module("_pypack_entry", '
+            'run_name="__main__", alter_sys=True)'
+        )
+
+    return f'''"""pypack bootstrap — auto-generated, do not edit."""
+import sys
+import os
+import runpy
+
+
+def _pypack_main():
+    self_path = os.environ.get("_PYPACK_SELF", os.path.abspath(sys.argv[0]))
+
+    # The binary IS a valid zip. Python's zipimport can import from
+    # zip-internal paths like: /path/to/binary/site-packages/click/__init__.py
+    zip_site = os.path.join(self_path, "site-packages")
+    if zip_site not in sys.path:
+        sys.path.insert(0, zip_site)
+    if self_path not in sys.path:
+        sys.path.insert(0, self_path)
+
+    # Present the binary path as argv[0] to user code
+    sys.argv[0] = self_path
+
+    # Run the entry point
+    {run_stmt}
+
+
+_pypack_main()
+'''
+
+
+def make_app_zip(entry_path, deps_dir=None):
+    """Create the in-memory ZIP payload containing bootstrap + code + deps."""
+    print("[4/6] Creating app payload...")
+    buf = io.BytesIO()
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        # 1. Bootstrap __main__.py
+        zf.writestr("__main__.py", _make_bootstrap(entry_path))
+
+        # 2. User code
+        if os.path.isdir(entry_path):
+            base = os.path.dirname(os.path.normpath(entry_path))
+            for root, dirs, files in os.walk(entry_path):
+                dirs[:] = [
+                    d for d in dirs
+                    if d != "__pycache__" and not d.startswith(".")
+                ]
+                for f in files:
+                    if f.endswith((".pyc", ".pyo")):
+                        continue
+                    filepath = os.path.join(root, f)
+                    arcname = os.path.relpath(filepath, base)
+                    zf.write(filepath, arcname)
+        else:
+            # Store single scripts as _pypack_entry.py so run_module can find them
+            zf.write(entry_path, "_pypack_entry.py")
+
+        # 3. Dependencies (from uv pip install --target)
+        if deps_dir and os.path.isdir(deps_dir):
+            for root, dirs, files in os.walk(deps_dir):
+                dirs[:] = [d for d in dirs if d != "__pycache__"]
+                for f in files:
+                    if f.endswith((".pyc", ".pyo")):
+                        continue
+                    filepath = os.path.join(root, f)
+                    arcname = os.path.join(
+                        "site-packages",
+                        os.path.relpath(filepath, deps_dir),
+                    )
+                    zf.write(filepath, arcname)
+
+    data = buf.getvalue()
+    print(f"       {len(data) / 1024:.0f} KB")
+    return data
+
+
+# ── Runtime compression ──────────────────────────────────────────────
+
+def compress_runtime(install_dir, output_path):
+    """Tar + zstd-compress the Python installation directory."""
+    print(f"[5/6] Compressing Python runtime...")
+    cmd = f"tar -cf - -C '{install_dir}' . | zstd -19 -q -o '{output_path}'"
+    subprocess.run(cmd, shell=True, check=True)
+    mb = os.path.getsize(output_path) / 1024 / 1024
+    print(f"       {mb:.1f} MB compressed")
+
+
+# ── Final assembly ───────────────────────────────────────────────────
+
+def assemble(stub_path, runtime_path, app_zip_bytes, output_path):
+    """Concatenate stub + runtime + app_zip + trailer → final binary."""
+    print("[6/6] Assembling binary...")
+
+    with open(output_path, "wb") as out:
+        # 1. Stub
+        with open(stub_path, "rb") as f:
+            out.write(f.read())
+        runtime_offset = out.tell()
+
+        # 2. Runtime blob
+        with open(runtime_path, "rb") as f:
+            runtime_data = f.read()
+        out.write(runtime_data)
+        runtime_size = len(runtime_data)
+        app_offset = out.tell()
+
+        # 3. App ZIP
+        out.write(app_zip_bytes)
+
+        # 4. Trailer (32 bytes)
+        out.write(MAGIC)                                     # 8 bytes
+        out.write(struct.pack("<Q", runtime_offset))         # 8 bytes
+        out.write(struct.pack("<Q", runtime_size))           # 8 bytes
+        out.write(struct.pack("<Q", app_offset))             # 8 bytes
+
+    os.chmod(output_path, 0o755)
+
+    total_mb = os.path.getsize(output_path) / 1024 / 1024
+    print(f"       Total: {total_mb:.1f} MB → {output_path}")
+
+
+# ── Build command ────────────────────────────────────────────────────
+
+def cmd_build(args):
+    """Execute the full build pipeline."""
+    # Preflight checks
+    require_tool("uv", "curl -LsSf https://astral.sh/uv/install.sh | sh")
+    require_tool("zstd", "apt install zstd / brew install zstd")
+    require_tool("tar")
+
+    entry = os.path.normpath(args.entry)
+    if not os.path.exists(entry):
+        die(f"Entry point not found: {entry}")
+
+    if os.path.isdir(entry):
+        main_py = os.path.join(entry, "__main__.py")
+        if not os.path.isfile(main_py):
+            die(f"Package '{entry}' has no __main__.py")
+
+    python_version = args.python or "3.13"
+
+    print(f"\n  pypack build")
+    print(f"  entry:   {entry}")
+    print(f"  python:  {python_version}")
+    print(f"  output:  {args.output}")
+    if args.requirements:
+        print(f"  deps:    {args.requirements}")
+    print()
+
+    with tempfile.TemporaryDirectory(prefix="pypack-") as work_dir:
+        # 1. Get Python via uv
+        python_path = uv_ensure_python(python_version)
+        install_root = uv_install_root(python_path)
+        print(f"       interpreter:  {python_path}")
+        print(f"       install root: {install_root}")
+
+        # 2. Install deps
+        deps_dir = None
+        if args.requirements:
+            deps_dir = os.path.join(work_dir, "deps")
+            uv_install_deps(python_path, args.requirements, deps_dir)
+
+        # 3. Compile C stub
+        stub_path = compile_stub(work_dir)
+
+        # 4. Create app ZIP
+        app_zip = make_app_zip(entry, deps_dir)
+
+        # 5. Compress runtime
+        runtime_path = os.path.join(work_dir, "runtime.tar.zst")
+        compress_runtime(install_root, runtime_path)
+
+        # 6. Assemble final binary
+        output = args.output
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        assemble(stub_path, runtime_path, app_zip, output)
+
+    print(f"\n  [✓] Build complete!")
+    print(f"      Run with: ./{output}")
+    print(f"      First run extracts the runtime to ~/.cache/pypack/")
+    print(f"      Subsequent runs start in ~100ms.\n")
+
+
+# ── CLI ──────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="pypack",
+        description="Single-binary Python executables, powered by uv.",
+        epilog="https://github.com/user/pypack",  # placeholder
+    )
+    subparsers = parser.add_subparsers(dest="command")
+
+    # build subcommand
+    build_parser = subparsers.add_parser(
+        "build",
+        help="Pack a Python app into a single executable",
+    )
+    build_parser.add_argument(
+        "--entry", required=True,
+        help="Entry point: a .py script or a package directory with __main__.py",
+    )
+    build_parser.add_argument(
+        "-o", "--output", required=True,
+        help="Path for the output binary",
+    )
+    build_parser.add_argument(
+        "--python", default="3.13",
+        help="Python version to bundle (default: 3.13)",
+    )
+    build_parser.add_argument(
+        "-r", "--requirements",
+        help="Path to requirements.txt for dependencies",
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "build":
+        cmd_build(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
